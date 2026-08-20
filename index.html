@@ -553,6 +553,7 @@ const S = {
   deleteMode: false, dragMode: false,
   grabMode: false, penMode: false, penAnywhere: false, mergeMode: false,
   loopMode: false, colorMode: false, quantMode: false, selMode: false, stencilMode: false,
+  gapRestMode: false,
   stEntry: "stencil",              // "stencil" | "quant" (beta)
   stTempo: 60,                     // BPM, quarter = 1 beat
   stDur: "quarter", stDots: 0,     // stencil value + dot / double-dot
@@ -1710,7 +1711,9 @@ function normalizeBars(rawBars) {
         continue;
       }
       if (ev.type === "rest") {
-        nb.push({ id: idCounter++, type: "rest", start, dur: r3(ev.dur) });
+        const e2 = { id: idCounter++, type: "rest", start, dur: r3(ev.dur) };
+        if (ev.gapRest === true) e2.gapRest = true;
+        nb.push(e2);
         if (!hasStart) cursor = start + ev.dur;
       } else if (ev.type === "bass" && typeof ev.midi === "number" &&
                  ev.midi >= MIDI_MIN && ev.midi <= MIDI_MAX) {
@@ -1954,6 +1957,7 @@ function eventClicked(ev, clickX, clickY, toneMidi) {
     renderAll();
     return;
   }
+  if (S.gapRestMode) { flash("That's a note — click the empty gap beside it."); return; }
   if (ev.type === "pattern" && !S.deleteMode && !S.grabMode) {
     if (S.colorMode) { flash("Pattern colors are set in the Pattern Studio (they apply to all instances)."); return; }
     if (S.dragMode || S.timeAdjust || S.mergeMode || S.quantMode || S.selMode || S.stencilMode) {
@@ -2258,6 +2262,39 @@ function applyRhythm(idx) {
     t += ev.dur;
   });
   flash(`Rhythm "${rhythm[0]}" applied to ${targets.length} note${targets.length === 1 ? "" : "s"}.`);
+  renderAll();
+}
+
+/* ── Gap→Rest: click a gap between two notes; it becomes a rest of exactly
+   that duration, drawn dotted so the counted time stays visible ── */
+function gapAt(t) {
+  const evs = [...bar()].sort((a, b) => a.start - b.start || a.id - b.id);
+  if (!evs.length) return null;
+  let frontier = 0;
+  for (const ev of evs) {
+    if (ev.start > frontier + 0.01 && t >= frontier - 1e-9 && t < ev.start)
+      return { s: frontier, e: ev.start };
+    frontier = Math.max(frontier, evEnd(ev));
+  }
+  return null;
+}
+function allGaps() {
+  const evs = [...bar()].sort((a, b) => a.start - b.start || a.id - b.id);
+  const gaps = [];
+  let frontier = 0;
+  for (const ev of evs) {
+    if (ev.start > frontier + 0.01) gaps.push({ s: frontier, e: ev.start });
+    frontier = Math.max(frontier, evEnd(ev));
+  }
+  return gaps;
+}
+function gapRestAt(t) {
+  const g = gapAt(t);
+  if (!g) { flash("Click inside a gap between two notes — the space before the first note counts too."); return; }
+  const ev = { id: idCounter++, type: "rest", gapRest: true, start: r3(g.s), dur: r3(g.e - g.s) };
+  S.bars[S.barIdx].push(ev);
+  pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ev.id });
+  flash(`Rest registered: ${fmt(ev.dur)} s gap at ${fmt(ev.start)}–${fmt(g.e)} s now counts as silence.`);
   renderAll();
 }
 
@@ -3004,8 +3041,12 @@ function renderStaff() {
 
     if (ev.type === "rest") {
       const restFill = playingNow ? TH().restFillHot : TH().restFill;
-      const r = svgEl("rect", { x, y: PAD_T, width: w, height: STAFF_H - PAD_T - PAD_B,
-        fill: restFill, "data-ev": ev.id, "data-basefill": restFill });
+      const r = ev.gapRest
+        ? svgEl("rect", { x: x + 1, y: PAD_T + 6, width: Math.max(w - 2, 4), height: STAFF_H - PAD_T - PAD_B - 12,
+            fill: "none", stroke: TH().tLabel, "stroke-width": 1.4, "stroke-dasharray": "4 4", rx: 4,
+            "data-ev": ev.id, "data-basefill": "none" })
+        : svgEl("rect", { x, y: PAD_T, width: w, height: STAFF_H - PAD_T - PAD_B,
+            fill: restFill, "data-ev": ev.id, "data-basefill": restFill });
       if (selected) { r.setAttribute("stroke", "#000"); r.setAttribute("stroke-width", 1.5); r.setAttribute("stroke-dasharray", "5 3"); }
       hook(r, null);
       svg.append(r);
@@ -3115,6 +3156,18 @@ function renderStaff() {
       y1: PAD_T - 6, y2: STAFF_H - PAD_B + 6, stroke: "#000", "stroke-width": 1, opacity: 0.3,
       "pointer-events": "none" }));
   }
+
+  /* Gap→Rest armed: outline every detectable gap so it can simply be clicked */
+  if (S.gapRestMode) allGaps().forEach(g => {
+    const gx = X(g.s), gw = Math.max((g.e - g.s) * pxPerSec, 8);
+    const box = svgEl("rect", { x: gx + 1, y: PAD_T + 6, width: gw - 2, height: STAFF_H - PAD_T - PAD_B - 12,
+      fill: "rgba(0,0,0,0.03)", stroke: "#999", "stroke-width": 1.2, "stroke-dasharray": "3 4", rx: 4 });
+    box.style.cursor = "copy";
+    box.addEventListener("click", e => { e.stopPropagation(); gapRestAt((g.s + g.e) / 2); });
+    svg.append(box);
+    svg.append(svgEl("text", { x: gx + gw / 2, y: PAD_T + 20, "text-anchor": "middle",
+      "font-size": 9.5, fill: "#999", "pointer-events": "none" }, `⌷ ${fmt(g.e - g.s)} s`));
+  });
 
   /* pattern instances: colored box, name, loop-mode + transport buttons, inner tones */
   bar().forEach(ev => {
@@ -4349,6 +4402,8 @@ function renderStatus() {
             (S.adoptArm ? " · Adopt armed: click the reference note" :
               S.harmonyOn ? " · Harmony: click the staff to place/move the ▼ entry point" : "; staff clicks select notes.")
           : `Quantized entry β — hold to record at ♩=${S.stTempo}; durations snap to the nearest beat value within the margin.`)
+        : S.gapRestMode
+        ? "Gap→Rest — every gap between notes is outlined; click one and it registers as a rest of exactly that duration."
         : S.selMode
           ? `Select — click notes to build a group (${S.groupSel.size} selected); drag a selected note to move them all, or mute / set durations below.`
           : S.quantMode
@@ -4689,7 +4744,7 @@ $("pauseBtn").addEventListener("click", () => {
 $("trimBtn").addEventListener("click", trimGaps);
 $("gapsBtn").addEventListener("click", closeGaps);
 $("undoBtn").addEventListener("click", undo);
-const MODES = ["restMode","chordMode","timeAdjust","deleteMode","dragMode","grabMode","penMode","mergeMode","loopMode","colorMode","quantMode","selMode","stencilMode"];
+const MODES = ["restMode","chordMode","timeAdjust","deleteMode","dragMode","grabMode","penMode","mergeMode","loopMode","colorMode","quantMode","selMode","stencilMode","gapRestMode"];
 function armMode(prop, keep) {
   keep = keep || [];
   const on = !S[prop];
@@ -4788,6 +4843,11 @@ $("staff").addEventListener("click", e => {
     setHarmonyT((e.clientX - r.left - PAD_L) / lastPxPerSec);
     return;
   }
+  if (S.gapRestMode) {
+    const r = $("staff").getBoundingClientRect();
+    gapRestAt(Math.max(0, (e.clientX - r.left - PAD_L) / lastPxPerSec));
+    return;
+  }
   if (S.penMode) {
     const rect = $("staff").getBoundingClientRect();
     penInsert(e.clientX - rect.left, e.clientY - rect.top);
@@ -4871,6 +4931,7 @@ const TOOL_MENU = [
   ["▦ Quantize", "quantMode", []],
   ["▣ Select", "selMode", []],
   ["◫ Stencil", "stencilMode", ["chordMode"]],
+  ["⌷ Gap→Rest", "gapRestMode", []],
 ];
 function renderMenus() {
   /* Tools */
