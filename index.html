@@ -211,6 +211,8 @@
       <div class="dropdown">
         <button class="mitem" id="mUndo">↶ Undo</button>
         <div class="msep"></div>
+        <button class="mitem" id="mTranspose">♪± Transpose…</button>
+        <div class="msep"></div>
         <button class="mitem" id="mGaps">⇥ Close gaps in bar</button>
         <button class="mitem" id="mTrim">⇤ Trim bar starts</button>
         <div class="msep"></div>
@@ -2297,6 +2299,105 @@ function groupStepDur(delta) {
   ids.forEach(id => { const f = findEv(id); if (f) f.ev.dur = Math.max(0.01, r3(f.ev.dur + delta)); });
   renderAll();
 }
+/* ── transpose: 2nds through octave, up or down; selection / bar / all bars ── */
+const INTERVALS = [
+  ["Minor 2nd", 1], ["Major 2nd", 2], ["Minor 3rd", 3], ["Major 3rd", 4],
+  ["Perfect 4th", 5], ["Tritone", 6], ["Perfect 5th", 7], ["Minor 6th", 8],
+  ["Major 6th", 9], ["Minor 7th", 10], ["Major 7th", 11], ["Octave", 12],
+];
+function anySelIds() {
+  const g = groupIds();
+  if (g.length) return g;
+  return stencilIds();
+}
+function transposeEvs(evs, semis) {
+  const pitched = evs.filter(e => e.type === "note" || e.type === "bass");
+  if (!pitched.length) return { ok: false, msg: "No pitched notes in that scope." };
+  for (const ev of pitched) {
+    if (ev.type === "note") {
+      for (const m of ev.midis) {
+        const nm = m + semis;
+        if (nm < MIDI_MIN || nm > MIDI_MAX)
+          return { ok: false, msg: `${dName(m)} would land on ${midiName(nm)} — outside C2–F7. Nothing was changed.` };
+      }
+    } else {
+      const nm = ev.midi + semis;
+      if (nm < MIDI_MIN || nm > BASS_MAX)
+        return { ok: false, msg: `Bass ${dName(ev.midi)} would leave its range. Nothing was changed.` };
+    }
+  }
+  const items = pitched.map(ev => ({
+    id: ev.id, oldStart: ev.start,
+    oldMidis: ev.midis ? [...ev.midis] : null,
+    oldMidi: ev.midi != null ? ev.midi : null,
+  }));
+  pitched.forEach(ev => {
+    if (ev.midis) ev.midis = ev.midis.map(m => m + semis);
+    if (ev.midi != null) ev.midi += semis;
+  });
+  pushUndo({ kind: "groupmove", items });
+  return { ok: true, n: pitched.length };
+}
+function openTransposeModal() {
+  const body = document.createElement("div");
+  body.className = "mrow";
+  let dir = "up", ival = 12, scope = anySelIds().length ? "sel" : "bar";
+  const mkRow = () => { const r = document.createElement("div"); r.className = "mline"; return r; };
+  const mkB = (txt, on, fn) => {
+    const b = document.createElement("button");
+    b.className = "btn small" + (on ? " active" : "");
+    b.textContent = txt;
+    b.addEventListener("click", fn);
+    return b;
+  };
+  const err = document.createElement("div");
+  err.style.cssText = "color:#c62828;font-size:12px;min-height:16px";
+  const rebuild = () => {
+    body.replaceChildren();
+    const r1 = mkRow();
+    r1.append(mkB("▲ Up", dir === "up", () => { dir = "up"; rebuild(); }),
+              mkB("▼ Down", dir === "down", () => { dir = "down"; rebuild(); }));
+    const sel = document.createElement("select");
+    sel.className = "pitchSel";
+    INTERVALS.forEach(([name, n]) => {
+      const o = document.createElement("option");
+      o.value = n;
+      o.textContent = `${name} (${n} st)`;
+      if (n === ival) o.selected = true;
+      sel.append(o);
+    });
+    sel.addEventListener("change", () => { ival = +sel.value; });
+    r1.append(sel);
+    body.append(r1);
+    const r2 = mkRow();
+    const nSel = anySelIds().length;
+    r2.append(
+      mkB(`Selection (${nSel})`, scope === "sel", () => { if (nSel) { scope = "sel"; rebuild(); } }),
+      mkB("This bar", scope === "bar", () => { scope = "bar"; rebuild(); }),
+      mkB("All bars", scope === "all", () => { scope = "all"; rebuild(); }));
+    if (!nSel) r2.children[0].disabled = true;
+    body.append(r2);
+    const r3 = mkRow();
+    const go = mkB("Apply", true, () => {
+      let evs;
+      if (scope === "sel") evs = anySelIds().map(id => findEv(id).ev);
+      else if (scope === "bar") evs = bar().slice();
+      else evs = S.bars.flat();
+      const res = transposeEvs(evs, dir === "down" ? -ival : ival);
+      if (!res.ok) { err.textContent = res.msg; return; }
+      closeModal();
+      const nm = INTERVALS.find(e => e[1] === ival)[0];
+      flash(`Transposed ${res.n} event${res.n === 1 ? "" : "s"} ${dir} a ${nm}.`);
+      renderAll();
+    });
+    const cancel = mkB("Cancel", false, closeModal);
+    r3.append(go, cancel);
+    body.append(r3, err);
+  };
+  rebuild();
+  showModal("Transpose", body);
+}
+
 /* trim unintended gaps between the selected notes only: each selected event is
    pulled left to follow the previous selected event at 0.002 s spacing */
 function selTrimGaps() {
@@ -3297,6 +3398,7 @@ function renderSel() {
     mk("🔇 Mute selected", () => groupMute(true), !ids.length || !anyUnmuted),
     mk("🔊 Unmute selected", () => groupMute(false), !anyMuted),
     mk("⇥ Trim gaps", selTrimGaps, ids.length < 2),
+    mk("♪± Transpose…", openTransposeModal, false),
     mk("⧉ Duplicate", dupGroup, !ids.length),
     mk("Clear selection", () => { S.groupSel.clear(); renderAll(); }, !ids.length));
   el.append(row2);
@@ -4304,7 +4406,8 @@ function renderMenus() {
 const proxy = (mid, target) => $(mid).addEventListener("click", () => $(target).click());
 proxy("mSave", "saveBtn"); proxy("mExport", "exportBtn"); proxy("mImport", "importBtn");
 proxy("mExportAll", "exportAllBtn"); proxy("mCopyAll", "copyAllBtn"); proxy("mPaste", "pasteBtn");
-proxy("mUndo", "undoBtn"); proxy("mGaps", "gapsBtn"); proxy("mTrim", "trimBtn"); proxy("mClear", "clearBtn");
+proxy("mUndo", "undoBtn");
+$("mTranspose").addEventListener("click", openTransposeModal); proxy("mGaps", "gapsBtn"); proxy("mTrim", "trimBtn"); proxy("mClear", "clearBtn");
 proxy("mPlayAll", "playAllBtn"); proxy("mPlayBar", "playBarBtn"); proxy("mPlayFrom", "playFromBtn");
 proxy("mPause", "pauseBtn"); proxy("mStop", "stopBtn");
 proxy("mPrevBar", "prevBarBtn"); proxy("mNextBar", "nextBarBtn");
