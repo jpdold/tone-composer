@@ -78,6 +78,17 @@
   body.theme-gy .barBox { background: #63666a; color: #000; border-color: #3d3f42; font-weight: 700; }
   body.theme-gy .barBox.cur { background: #000; color: #fff; }
   body.theme-gy .barBox.selb { outline-color: #000; }
+  #patPanel { display: none; border: 2px solid #1b5e20; border-radius: 6px;
+    padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
+  #patPanel .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0; }
+  .patSlot { min-width: 44px; height: 34px; border: 1.5px solid #bbb; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center; font-size: 11px;
+    cursor: pointer; user-select: none; background: #fff; padding: 0 4px; }
+  .patSlot.committed { border-width: 2px; font-weight: 700; }
+  .patSlot.currentSlot { border: 2px dashed #000; }
+  .patSlot.lockedSlot { opacity: .4; cursor: default; }
+  .patSlot.selSlot { outline: 2px solid #000; outline-offset: 1px; }
+  body.theme-gy .patSlot { background: #63666a; color: #000; border-color: #3d3f42; }
   #tonalPanel { border: 1.5px solid #000; border-radius: 6px; padding: 8px 12px;
     margin-bottom: 12px; display: none; font-size: 13px; }
   #tonalPanel .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -263,6 +274,9 @@
     <div class="menu" data-m="mode"><button>Mode</button>
       <div class="dropdown" id="ddMode"></div>
     </div>
+    <div class="menu" data-m="patterns"><button>Patterns</button>
+      <div class="dropdown" id="ddPatterns"></div>
+    </div>
     <div class="menu" data-m="help"><button>Help</button>
       <div class="dropdown">
         <button class="mitem" id="mInstructions">Instructions</button>
@@ -367,6 +381,7 @@
 
   <div class="rightPane">
   <div id="msgLine"><span id="msg"></span></div>
+  <div id="patPanel"></div>
   <div id="tonalPanel"></div>
 
   <div id="statusStrip"></div>
@@ -549,6 +564,10 @@ const S = {
   stencilSel: new Set(),
   stencilChordId: null,            // chord being built when Chord+ is on
   barSel: new Set(), barSelMode: false,
+  patterns: [],                    // committed pattern library
+  patEdit: null,                   // Pattern Studio session (null = normal composing)
+  patSel: new Set(),               // studio slot selection (for Combine)
+  noteShape: "regular",            // entry default: regular | staccato | elongated
   mergeSel: new Set(),
   groupSel: new Set(),
   selDurVal: "0.500",
@@ -590,7 +609,7 @@ const undoStack = [];              // {kind:"addEvent"|"addTone"|"time"|"remove"
 
 const $ = id => document.getElementById(id);
 const bar = () => S.bars[S.barIdx] || [];
-const evEnd = ev => ev.start + ev.dur;
+const evEnd = ev => ev.type === "pattern" ? ev.start + patInstSpan(ev) : ev.start + ev.dur;
 const findEv = (id) => {
   for (let bi = 0; bi < S.bars.length; bi++) {
     const ev = S.bars[bi].find(e => e.id === id);
@@ -981,6 +1000,10 @@ function undo() {
       }
     });
     flash("Trim undone.");
+  } else if (a.kind === "patmove") {
+    const f = findEv(a.id);
+    if (f) { f.ev.start = a.oldStart; f.ev.tr = a.oldTr; }
+    flash("Pattern move undone.");
   } else if (a.kind === "dupgroup") {
     const del = new Set(a.ids);
     S.bars[a.barIdx] = S.bars[a.barIdx].filter(e => !del.has(e.id));
@@ -993,6 +1016,7 @@ function undo() {
         f.ev.start = it.oldStart;
         if (it.oldMidis) f.ev.midis = [...it.oldMidis];
         if (it.oldMidi != null) f.ev.midi = it.oldMidi;
+        if (it.oldTr != null) f.ev.tr = it.oldTr;
       }
     });
     flash("Group move undone.");
@@ -1234,8 +1258,10 @@ function stopPlayback() {
   S.playing = false; S.playTime = -1; S.playBarIdx = -1;
   renderAll();
 }
-function scheduleTone(ctx, t0, midi, start, durIn, vel) {
-  const dur = Math.max(durIn - Math.min(0.04, durIn * 0.1), 0.05);
+function scheduleTone(ctx, t0, midi, start, durIn, vel, shape) {
+  const dur = shape === "elongated"
+    ? Math.max(durIn, 0.05)
+    : Math.max(durIn - Math.min(0.04, durIn * 0.1), 0.05);
   const level = 0.2 * S.volume * (vel != null ? velGain(vel) : 1);
   const h = startVoice(ctx, midi, t0 + start, dur, level, vel);
   h.nodes.forEach(n => playNodes.push(n));
@@ -1261,8 +1287,30 @@ function scheduleWindow(ctx, t0, bi, ws, we, base) {
   S.bars[bi].forEach(ev => {
     if (ev.start >= ws && ev.start < we && !ev.muted) {
       const at = base + (ev.start - ws);
-      if (ev.type === "note") ev.midis.forEach(m => scheduleTone(ctx, t0, m, at, ev.dur, ev.vel));
+      if (ev.type === "note") ev.midis.forEach(m => scheduleTone(ctx, t0, m, at, shapeDur(ev), ev.vel, ev.shape));
       else if (ev.type === "bass") scheduleTone(ctx, t0, ev.midi, at, ev.dur, ev.vel);
+      else if (ev.type === "pattern") {
+        const p = patById(ev.pid);
+        if (p) {
+          const barEnd = we - ws + base;   // window end in schedule time
+          const step = ev.pmode === "lo" ? p.span * 2 : p.span;
+          const cycles = ev.pmode === "li"
+            ? Math.max(1, Math.ceil((we - ev.start) / p.span))
+            : ev.pmode === "lo" ? (ev.pcount || 1) : 1;
+          for (let k = 0; k < cycles; k++) {
+            const cAt = at + k * step;
+            if (ev.pmode === "li" && ev.start + k * p.span >= we) break;
+            p.events.forEach(pe => {
+              if (pe.type !== "note") return;
+              pe.midis.forEach(m => {
+                const mm = m + (ev.tr || 0);
+                if (mm >= MIDI_MIN && mm <= MIDI_MAX)
+                  scheduleTone(ctx, t0, mm, cAt + pe.start, shapeDur(pe), pe.vel, pe.shape);
+              });
+            });
+          }
+        }
+      }
     }
   });
 }
@@ -1632,7 +1680,9 @@ function saveComp() {
   const saved = readSaved();
   const existed = !!saved[name];
   saved[name] = { version: 2.4, bars: S.bars, loop: S.loop, colorRules: S.colorRules,
-    notation: S.notation, tonal: S.tonal, voice: S.voice, savedAt: Date.now() };
+    notation: S.notation, tonal: S.tonal, voice: S.voice,
+    patterns: S.patterns.filter(p => S.bars.flat().some(e => e.type === "pattern" && e.pid === p.pid)),
+    savedAt: Date.now() };
   flash(writeSaved(saved) ? (existed ? `Updated "${name}".` : `Saved "${name}".`)
                           : "Save failed — storage unavailable.");
   renderSaved();
@@ -1648,6 +1698,17 @@ function normalizeBars(rawBars) {
       if (!ev || typeof ev.dur !== "number" || ev.dur <= 0 || ev.dur > IMPORT_MAX_DUR) continue;
       const hasStart = typeof ev.start === "number" && ev.start >= 0;
       const start = r3(hasStart ? ev.start : cursor);
+      if (ev.type === "pattern") {
+        if (typeof ev.pid !== "number") continue;
+        const e2 = { id: idCounter++, type: "pattern", pid: ev.pid,
+          start: r3(typeof ev.start === "number" ? ev.start : 0), dur: r3(ev.dur || 1),
+          pmode: ["li", "lo"].includes(ev.pmode) ? ev.pmode : "once",
+          pcount: Math.max(1, Math.min(8, parseInt(ev.pcount, 10) || 1)),
+          tr: parseInt(ev.tr, 10) || 0 };
+        if (ev.muted === true) e2.muted = true;
+        nb.push(e2);
+        continue;
+      }
       if (ev.type === "rest") {
         nb.push({ id: idCounter++, type: "rest", start, dur: r3(ev.dur) });
         if (!hasStart) cursor = start + ev.dur;
@@ -1666,6 +1727,7 @@ function normalizeBars(rawBars) {
           if (typeof ev.color === "string" && /^#[0-9a-fA-F]{6}$/.test(ev.color)) e2.color = ev.color;
           if (ev.muted === true) e2.muted = true;
           if (typeof ev.vel === "number" && ev.vel > 0 && ev.vel <= 1) e2.vel = r3(ev.vel);
+          if (ev.shape === "staccato" || ev.shape === "elongated") e2.shape = ev.shape;
           nb.push(e2);
           if (!hasStart) cursor = start + ev.dur;
         }
@@ -1701,6 +1763,12 @@ function restoreExtras(d) {
     if (S.notation === "tonal") S.stTempo = S.tonal.tempo;
   }
   S.voice = ["piano", "sampled"].includes(d.voice) ? d.voice : "sine";   // older files stay sine
+  if (Array.isArray(d.patterns)) {
+    d.patterns.forEach(p => {
+      if (p && typeof p.pid === "number" && Array.isArray(p.events) && !patById(p.pid)) S.patterns.push(p);
+    });
+    patStore();
+  }
   renderKeys(true);
 }
 function loadComp(name) {
@@ -1804,7 +1872,8 @@ function openPasteImport() {
 }
 function exportComp() {
   const blob = new Blob([JSON.stringify({ version: 2.4, bars: S.bars, loop: S.loop, colorRules: S.colorRules,
-    notation: S.notation, tonal: S.tonal, voice: S.voice }, null, 2)],
+    notation: S.notation, tonal: S.tonal, voice: S.voice,
+    patterns: S.patterns.filter(p => S.bars.flat().some(e => e.type === "pattern" && e.pid === p.pid)) }, null, 2)],
     { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -1824,6 +1893,7 @@ function importComp(file) {
 /* ─────────────── labels ─────────────── */
 function evLabel(ev) {
   if (ev.type === "rest") return "rest";
+  if (ev.type === "pattern") { const p = patById(ev.pid); return `⧉ ${p ? p.name : "pattern"}`; }
   if (ev.type === "bass") return "bass " + dName(ev.midi);
   return ev.midis.map(dName).join("+");
 }
@@ -1881,6 +1951,15 @@ function eventClicked(ev, clickX, clickY, toneMidi) {
     if (ev.type !== "note") { flash("Quantize works on melody notes only."); return; }
     if (S.quantSel.has(ev.id)) S.quantSel.delete(ev.id); else S.quantSel.add(ev.id);
     S.quantLast = null;   // new selection supersedes live retiming of the previous set
+    renderAll();
+    return;
+  }
+  if (ev.type === "pattern" && !S.deleteMode && !S.grabMode) {
+    if (S.colorMode) { flash("Pattern colors are set in the Pattern Studio (they apply to all instances)."); return; }
+    if (S.dragMode || S.timeAdjust || S.mergeMode || S.quantMode || S.selMode || S.stencilMode) {
+      flash("Patterns are absolute — transpose them or drag them along time with ✋ Grab."); return;
+    }
+    S.selectedId = ev.id; S.selectedMidi = null;
     renderAll();
     return;
   }
@@ -2029,6 +2108,7 @@ function stencilEnter(midi, vel) {
   const startT = (S.harmonyOn && S.harmonyT != null) ? S.harmonyT : melodyCursor(bar());
   const ev = { id: idCounter++, type: "note", midis: [midi], start: r3(startT), dur: d };
   if (S.midiVelOn && vel != null) ev.vel = r3(vel);
+  if (S.noteShape !== "regular") ev.shape = S.noteShape;
   S.bars[S.barIdx].push(ev);
   pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ev.id });
   if (S.chordMode) S.stencilChordId = ev.id;
@@ -2181,6 +2261,45 @@ function applyRhythm(idx) {
   renderAll();
 }
 
+/* pattern instance grab: horizontal = time, vertical = transpose (absolute otherwise) */
+let pgrab = null;
+function beginPatGrab(ev, e) {
+  const p = patById(ev.pid);
+  if (!p) return;
+  let lo = -Infinity, hi = Infinity;
+  p.events.forEach(pe => {
+    if (pe.type !== "note") return;
+    pe.midis.forEach(m => {
+      lo = Math.max(lo, MIDI_MIN - (m + (ev.tr || 0)));
+      hi = Math.min(hi, MIDI_MAX - (m + (ev.tr || 0)));
+    });
+  });
+  pgrab = { id: ev.id, startX: e.clientX, startY: e.clientY,
+    px: lastPxPerSec, oldStart: ev.start, oldTr: ev.tr || 0,
+    offLo: lo === -Infinity ? 0 : lo, offHi: hi === Infinity ? 0 : hi };
+}
+window.addEventListener("pointermove", e => {
+  if (!pgrab) return;
+  const f = findEv(pgrab.id);
+  if (!f) { pgrab = null; return; }
+  const shift = (e.clientX - pgrab.startX) / pgrab.px;
+  const off = Math.max(pgrab.offLo, Math.min(-Math.round((e.clientY - pgrab.startY) / STEP), pgrab.offHi));
+  f.ev.start = r3(Math.max(0, pgrab.oldStart + shift));
+  f.ev.tr = pgrab.oldTr + off;
+  renderStaff();
+});
+window.addEventListener("pointerup", () => {
+  if (!pgrab) return;
+  const g = pgrab; pgrab = null;
+  const f = findEv(g.id);
+  if (f && (f.ev.start !== g.oldStart || (f.ev.tr || 0) !== g.oldTr)) {
+    undoStack.push({ kind: "patmove", id: g.id, oldStart: g.oldStart, oldTr: g.oldTr });
+    if (undoStack.length > 100) undoStack.shift();
+    flash(`Pattern moved to ${fmt(f.ev.start)} s${f.ev.tr ? `, transposed ${f.ev.tr > 0 ? "+" : ""}${f.ev.tr} st` : ""}.`);
+  }
+  renderAll();
+});
+
 /* group select: drag any selected note to move the whole group (time + transpose),
    set durations together, or mute/unmute the selection for playback */
 let gdrag = null;   // { ids, startX, startY, px, orig: Map, shiftLo, offLo, offHi, moved }
@@ -2311,7 +2430,7 @@ function anySelIds() {
   return stencilIds();
 }
 function transposeEvs(evs, semis) {
-  const pitched = evs.filter(e => e.type === "note" || e.type === "bass");
+  const pitched = evs.filter(e => e.type === "note" || e.type === "bass" || e.type === "pattern");
   if (!pitched.length) return { ok: false, msg: "No pitched notes in that scope." };
   for (const ev of pitched) {
     if (ev.type === "note") {
@@ -2319,6 +2438,16 @@ function transposeEvs(evs, semis) {
         const nm = m + semis;
         if (nm < MIDI_MIN || nm > MIDI_MAX)
           return { ok: false, msg: `${dName(m)} would land on ${midiName(nm)} — outside C2–F7. Nothing was changed.` };
+      }
+    } else if (ev.type === "pattern") {
+      const p = patById(ev.pid);
+      if (p) for (const pe of p.events) {
+        if (pe.type !== "note") continue;
+        for (const m of pe.midis) {
+          const nm = m + (ev.tr || 0) + semis;
+          if (nm < MIDI_MIN || nm > MIDI_MAX)
+            return { ok: false, msg: `Pattern ${p.name} would leave C2–F7. Nothing was changed.` };
+        }
       }
     } else {
       const nm = ev.midi + semis;
@@ -2330,8 +2459,10 @@ function transposeEvs(evs, semis) {
     id: ev.id, oldStart: ev.start,
     oldMidis: ev.midis ? [...ev.midis] : null,
     oldMidi: ev.midi != null ? ev.midi : null,
+    oldTr: ev.type === "pattern" ? (ev.tr || 0) : null,
   }));
   pitched.forEach(ev => {
+    if (ev.type === "pattern") { ev.tr = (ev.tr || 0) + semis; return; }
     if (ev.midis) ev.midis = ev.midis.map(m => m + semis);
     if (ev.midi != null) ev.midi += semis;
   });
@@ -2668,6 +2799,7 @@ function penInsert(clickX, clickY) {
     t = prevEnd;
   }
   const ev = { id: idCounter++, type: "note", midis: [midi], start: r3(t), dur: r3(dur) };
+  if (S.noteShape !== "regular") ev.shape = S.noteShape;
   S.bars[S.barIdx].push(ev);
   pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ev.id });
   previewTone(midi, Math.min(dur, 1));
@@ -2887,6 +3019,8 @@ function renderStaff() {
       return;
     }
 
+    if (ev.type === "pattern") return;   // rendered separately as a boxed instance
+
     const midis = ev.type === "bass" ? [ev.midi] : ev.midis;
     const isBass = ev.type === "bass";
     const ys = midis.map(yOfMidi);
@@ -2981,6 +3115,80 @@ function renderStaff() {
       y1: PAD_T - 6, y2: STAFF_H - PAD_B + 6, stroke: "#000", "stroke-width": 1, opacity: 0.3,
       "pointer-events": "none" }));
   }
+
+  /* pattern instances: colored box, name, loop-mode + transport buttons, inner tones */
+  bar().forEach(ev => {
+    if (ev.type !== "pattern") return;
+    const p = patById(ev.pid);
+    const x = X(ev.start);
+    const w = Math.max(patInstSpan(ev) * pxPerSec, 40);
+    const col = p ? p.color : PAT_DEFAULT_COLOR;
+    const boxTop = PAD_T - 2, boxBot = STAFF_H - PAD_B + 2;
+    const box = svgEl("rect", { x, y: boxTop, width: w, height: boxBot - boxTop,
+      fill: "none", stroke: col, "stroke-width": 2.5, rx: 5,
+      opacity: ev.muted ? 0.35 : 1, "data-ev": ev.id });
+    box.style.cursor = S.grabMode ? "move" : "pointer";
+    box.addEventListener("click", e => {
+      e.stopPropagation();
+      const rect = svg.getBoundingClientRect();
+      eventClicked(ev, e.clientX - rect.left, e.clientY - rect.top, null);
+    });
+    if (S.grabMode) box.addEventListener("pointerdown", e => {
+      if (S.playing || grab) return;
+      e.stopPropagation(); e.preventDefault();
+      try { box.setPointerCapture(e.pointerId); } catch (err) {}
+      beginPatGrab(ev, e);
+    });
+    svg.append(box);
+    /* inner tones (display only) */
+    if (p) p.events.forEach(pe => {
+      if (pe.type !== "note") return;
+      pe.midis.forEach(m => {
+        const mm = m + (ev.tr || 0);
+        if (mm < MIDI_MIN || mm > MIDI_MAX) return;
+        svg.append(svgEl("rect", {
+          x: X(ev.start + pe.start), y: yOfMidi(mm) - 3,
+          width: Math.max(pe.dur * pxPerSec - 1, 3), height: 6,
+          fill: col, opacity: 0.75, rx: 2, "pointer-events": "none" }));
+      });
+    });
+    /* header: name + mode badge + buttons */
+    const trTag = ev.tr ? ` ${ev.tr > 0 ? "+" : ""}${ev.tr}st` : "";
+    const modeTag = ev.pmode === "li" ? " · Li ∞" : ev.pmode === "lo" ? ` · Lo ×${ev.pcount || 1}` : "";
+    svg.append(svgEl("text", { x: x + 4, y: boxTop - 4, "font-size": 10, "font-weight": 700,
+      fill: col, "pointer-events": "none" }, `${p ? p.name : "?"}${trTag}${modeTag}`));
+    const mkBtn = (bx, txt, title, fn, active) => {
+      const g = svgEl("g", {});
+      const r = svgEl("rect", { x: bx, y: boxTop + 3, width: 22, height: 14, rx: 3,
+        fill: active ? col : TH().sheet, stroke: col, "stroke-width": 1.2 });
+      const t = svgEl("text", { x: bx + 11, y: boxTop + 13.5, "text-anchor": "middle",
+        "font-size": 8.5, "font-weight": 700, fill: active ? "#fff" : col, "pointer-events": "none" }, txt);
+      r.style.cursor = "pointer";
+      const tt = svgEl("title", {}); tt.textContent = title; r.append(tt);
+      r.addEventListener("click", e => { e.stopPropagation(); fn(); });
+      g.append(r, t);
+      svg.append(g);
+    };
+    let bx = x + 4;
+    mkBtn(bx, "Li", "Loop infinitely (fills the rest of the bar)", () => {
+      ev.pmode = ev.pmode === "li" ? "once" : "li"; renderAll();
+    }, ev.pmode === "li"); bx += 25;
+    mkBtn(bx, "Lo", "Play once, rest one full cycle, repeat", () => {
+      ev.pmode = ev.pmode === "lo" ? "once" : "lo";
+      if (ev.pmode === "lo" && !ev.pcount) ev.pcount = 1;
+      renderAll();
+    }, ev.pmode === "lo"); bx += 25;
+    mkBtn(bx, `×${ev.pcount || 1}`, "Repeat count for Lo (click cycles 1–8)", () => {
+      ev.pcount = ((ev.pcount || 1) % 8) + 1; renderAll();
+    }, false); bx += 25;
+    mkBtn(bx, "▶", "Preview this pattern instance", () => patPreviewPlay(ev), patPrev && patPrev.evId === ev.id); bx += 25;
+    mkBtn(bx, "⏸", "Pause / resume preview", () => {
+      if (!patPrev || !audioCtx) return;
+      if (!S.paused) { audioCtx.suspend(); S.paused = true; } else { audioCtx.resume(); S.paused = false; }
+      renderStatus();
+    }, S.paused && patPrev && patPrev.evId === ev.id); bx += 25;
+    mkBtn(bx, "■", "Stop preview", patPreviewStop, false);
+  });
 
   /* harmony entry point — the vertical positioning bar */
   if (S.stencilMode && S.harmonyOn && S.harmonyT != null) {
@@ -3425,6 +3633,191 @@ function renderSel() {
   el.append(row3);
 }
 
+/* ═══════════ Pattern Sets ═══════════
+   Studio: 16 slots, sequential commit gating, combine 2–8 adjacent slots,
+   exact time-signature fill required to commit. Committed patterns are
+   absolute in compositions: transposable and time-draggable only, boxed
+   in the pattern's color, with Li / Lo / ×N loop modes per instance.   */
+const PAT_SLOTS = 16, PAT_MAX_GROUP = 8, PAT_DEFAULT_COLOR = "#1b5e20";
+const PAT_LSKEY = "toneComposerV2.patterns", PATSET_LSKEY = "toneComposerV2.patset";
+function patLoad() {
+  try {
+    S.patterns = JSON.parse(localStorage.getItem(PAT_LSKEY) || "[]") || [];
+  } catch (e) { S.patterns = []; }
+}
+function patStore() {
+  try { localStorage.setItem(PAT_LSKEY, JSON.stringify(S.patterns)); } catch (e) {}
+}
+function patById(pid) { return S.patterns.find(p => p.pid === pid) || null; }
+function patSetLoad() {
+  try { return JSON.parse(localStorage.getItem(PATSET_LSKEY) || "null"); } catch (e) { return null; }
+}
+function patSetStore(groups) {
+  try { localStorage.setItem(PATSET_LSKEY, JSON.stringify(groups)); } catch (e) {}
+}
+const patBarCap = () => (TS_BEATS[S.patEdit.sig] || 4) * (60 / S.patEdit.tempo);
+const patGroupCap = () => patBarCap() * S.patEdit.groupLen;
+function patUsedSlots() { return S.patEdit.groups.reduce((a, g) => a + g.len, 0); }
+/* coverage check: notes+rests must tile [0, cap] with no holes (3 ms tolerance) */
+function patCoverage(evts, cap) {
+  if (!evts.length) return { ok: false, msg: "The pattern is empty." };
+  const sorted = [...evts].sort((a, b) => a.start - b.start);
+  let frontier = 0;
+  for (const ev of sorted) {
+    if (ev.start > frontier + 0.003)
+      return { ok: false, msg: `Gap at ${fmt(frontier)}–${fmt(ev.start)} s — fill it with a rest (all entries are manual).` };
+    frontier = Math.max(frontier, evEnd(ev));
+  }
+  if (frontier < cap - 0.003)
+    return { ok: false, msg: `Filled ${fmt(frontier)} of ${fmt(cap)} s — the time signature isn't complete.` };
+  if (frontier > cap + 0.003)
+    return { ok: false, msg: `Content runs ${fmt(frontier)} s — ${fmt(frontier - cap)} s past the bar${S.patEdit.groupLen > 1 ? " group" : ""}. Trim it to exactly ${fmt(cap)} s.` };
+  return { ok: true };
+}
+function enterPatternStudio() {
+  if (S.patEdit) return;
+  stopPlayback(); midiPanic();
+  const saved = patSetLoad();
+  S.patEdit = {
+    snapshot: {
+      bars: S.bars, barIdx: S.barIdx, loop: S.loop, colorRules: S.colorRules,
+      notation: S.notation, tonal: S.tonal, voice: S.voice,
+    },
+    tempo: S.stTempo, sig: "4/4",
+    groups: Array.isArray(saved) ? saved.filter(g => patById(g.pid)) : [],
+    groupLen: 1,
+    editSlot: null,          // committed slot being renamed/recolored
+  };
+  S.bars = [[]]; S.barIdx = 0; S.loop = null;
+  S.patSel.clear();
+  MODES.forEach(k => S[k] = false);
+  flash("Pattern Studio — set the tempo first, then enter notes and rests manually to fill the bar exactly.");
+  renderAll();
+}
+function exitPatternStudio() {
+  if (!S.patEdit) return;
+  stopPlayback(); midiPanic(); patPreviewStop();
+  const sn = S.patEdit.snapshot;
+  S.bars = sn.bars; S.barIdx = Math.min(sn.barIdx, S.bars.length - 1);
+  S.loop = sn.loop; S.colorRules = sn.colorRules;
+  S.notation = sn.notation; S.tonal = sn.tonal; S.voice = sn.voice;
+  S.patEdit = null;
+  S.patSel.clear();
+  flash("Back to the composition.");
+  renderKeys(true);
+  renderAll();
+}
+function patCombine() {
+  const sel = [...S.patSel].sort((a, b) => a - b);
+  const next = patUsedSlots();
+  if (sel.length < 2 || sel.length > PAT_MAX_GROUP) { flash(`Select 2–${PAT_MAX_GROUP} adjacent bars to combine.`); return; }
+  for (let i = 1; i < sel.length; i++)
+    if (sel[i] !== sel[i - 1] + 1) { flash("Combined bars must be adjacent."); return; }
+  if (sel[0] !== next) { flash(`Combining must start at the next empty bar (bar ${next + 1}).`); return; }
+  if (sel[sel.length - 1] >= PAT_SLOTS) { flash("Selection runs past the 16-slot set."); return; }
+  S.patEdit.groupLen = sel.length;
+  S.patSel.clear();
+  flash(`Bars ${sel[0] + 1}–${sel[sel.length - 1] + 1} combined — one pattern of ${sel.length} bars (${fmt(patGroupCap())} s).`);
+  renderAll();
+}
+function patCommit() {
+  const cap = patGroupCap();
+  const evts = S.bars[0].filter(e => e.type === "note" || e.type === "rest");
+  const cov = patCoverage(evts, cap);
+  if (!cov.ok) { flash(cov.msg); return; }
+  const n = S.patEdit.groups.length + 1;
+  const pat = {
+    pid: Date.now(),
+    name: `P${n}`,
+    color: PAT_DEFAULT_COLOR,
+    tempo: S.patEdit.tempo, sig: S.patEdit.sig, nbars: S.patEdit.groupLen,
+    span: r3(cap),
+    events: evts.map(e => ({
+      type: e.type, start: r3(e.start), dur: r3(e.dur),
+      midis: e.midis ? [...e.midis] : undefined,
+      vel: e.vel, shape: e.shape,
+    })),
+  };
+  S.patterns.push(pat);
+  patStore();
+  S.patEdit.groups.push({ len: S.patEdit.groupLen, pid: pat.pid });
+  patSetStore(S.patEdit.groups);
+  S.patEdit.groupLen = 1;
+  S.bars = [[]]; S.barIdx = 0;
+  undoStack.length = 0;
+  flash(`${pat.name} committed (${pat.nbars} bar${pat.nbars === 1 ? "" : "s"}, ${fmt(pat.span)} s) — now editing the next pattern.`);
+  renderAll();
+}
+/* instance duration: once = span; Lo ×N = N plays + N−1 silent cycles; Li shows one cycle */
+function patInstSpan(ev) {
+  const p = patById(ev.pid);
+  if (!p) return ev.dur || 1;
+  if (ev.pmode === "lo") return p.span * (2 * (ev.pcount || 1) - 1);
+  return p.span;
+}
+function patInsertIntoSnapshot(pid, barIdx0, everyN) {
+  const p = patById(pid);
+  if (!p) return 0;
+  const bars = S.patEdit.snapshot.bars;
+  let added = 0;
+  for (let b = barIdx0; b < bars.length; b += (everyN > 0 ? everyN : bars.length + 1)) {
+    const cursor = bars[b].length ? Math.max(...bars[b].map(evEnd)) : 0;
+    bars[b].push({ id: idCounter++, type: "pattern", pid, start: r3(cursor), dur: r3(p.span),
+      pmode: "once", pcount: 1, tr: 0 });
+    added++;
+    if (!(everyN > 0)) break;
+  }
+  return added;
+}
+/* per-box preview */
+let patPrev = null;
+function patPreviewStop() {
+  if (!patPrev) return;
+  clearInterval(patPrev.timer);
+  playNodes.forEach(n => { try { n.stop(); } catch (e) {} });
+  playNodes.length = 0;
+  if (S.paused && audioCtx) { try { audioCtx.resume(); } catch (e) {} S.paused = false; }
+  patPrev = null;
+  renderStatus();
+}
+function patPreviewPlay(ev) {
+  patPreviewStop();
+  if (S.playing) stopPlayback();
+  const p = patById(ev.pid);
+  if (!p) return;
+  const ctx = ensureCtx();
+  const doPlay = () => {
+    const t0 = ctx.currentTime + 0.1;
+    const state = { next: 0, cycle: 0 };
+    const cycles = ev.pmode === "li" ? Infinity : (ev.pmode === "lo" ? (ev.pcount || 1) : 1);
+    const step = ev.pmode === "lo" ? p.span * 2 : p.span;
+    const pumpP = () => {
+      while (state.cycle < cycles && state.next < ctx.currentTime - t0 + 2.5) {
+        p.events.forEach(pe => {
+          if (pe.type !== "note") return;
+          pe.midis.forEach(m => {
+            const mm = m + (ev.tr || 0);
+            if (mm >= MIDI_MIN && mm <= MIDI_MAX)
+              scheduleTone(ctx, t0, mm, state.next + pe.start, shapeDur(pe), pe.vel);
+          });
+        });
+        state.next += step;
+        state.cycle++;
+      }
+      if (state.cycle >= cycles && ctx.currentTime - t0 > state.next - (ev.pmode === "lo" ? p.span : 0)) patPreviewStop();
+    };
+    patPrev = { evId: ev.id, timer: setInterval(pumpP, 200) };
+    pumpP();
+    renderStatus();
+  };
+  if (ctx.state === "suspended") { try { ctx.resume().then(doPlay).catch(doPlay); } catch (e) { doPlay(); } }
+  else doPlay();
+}
+function shapeDur(pe) {
+  if (pe.shape === "staccato") return Math.max(pe.dur * 0.5, 0.04);
+  return pe.dur;
+}
+
 /* ── bar map: select / open / reorder / delete bars ── */
 function moveBars(dir) {
   const sel = [...S.barSel].sort((a, b) => a - b);
@@ -3507,9 +3900,169 @@ function renderBarGrid() {
   $("barDelSel").textContent = `✕ Delete${S.barSel.size ? " (" + S.barSel.size + ")" : ""}`;
 }
 
+function renderPatPanel() {
+  const el = $("patPanel");
+  if (!S.patEdit) { el.style.display = "none"; el.replaceChildren(); return; }
+  el.style.display = "block";
+  el.replaceChildren();
+  const P = S.patEdit;
+  const mkB = (txt, on, fn, dis) => {
+    const b = document.createElement("button");
+    b.className = "btn small" + (on ? " active" : "");
+    b.textContent = txt; b.disabled = !!dis;
+    b.addEventListener("click", fn);
+    return b;
+  };
+  const lab = t => { const x = document.createElement("span");
+    x.style.cssText = "font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#666"; x.textContent = t; return x; };
+
+  /* row 1: header — tempo first (the user's first action), sig, exit */
+  const r1 = document.createElement("div"); r1.className = "row";
+  const title = document.createElement("span");
+  title.style.cssText = "font-family:Georgia,serif;font-size:15px;font-weight:700";
+  title.textContent = "Pattern Studio";
+  r1.append(title, lab("♩ ="));
+  const tin = document.createElement("input");
+  tin.type = "text"; tin.inputMode = "numeric"; tin.value = P.tempo; tin.style.width = "54px";
+  tin.addEventListener("change", () => {
+    let v = parseInt(String(tin.value).trim(), 10);
+    if (isNaN(v)) v = 60;
+    P.tempo = Math.max(20, Math.min(240, v));
+    S.stTempo = P.tempo;             // stencil grid follows the studio tempo
+    renderAll();
+  });
+  r1.append(tin, lab("Time"));
+  const sigSel = document.createElement("select");
+  sigSel.className = "pitchSel";
+  Object.keys(TS_BEATS).forEach(sig => {
+    const o = document.createElement("option");
+    o.value = sig; o.textContent = sig;
+    if (P.sig === sig) o.selected = true;
+    sigSel.append(o);
+  });
+  sigSel.addEventListener("change", () => { P.sig = sigSel.value; renderAll(); });
+  r1.append(sigSel);
+  r1.append(mkB("Exit studio", false, exitPatternStudio));
+  el.append(r1);
+
+  /* row 2: 16 slots */
+  const r2 = document.createElement("div"); r2.className = "row";
+  const used = patUsedSlots();
+  let slot = 0;
+  P.groups.forEach(g => {
+    const p = patById(g.pid);
+    const box = document.createElement("div");
+    box.className = "patSlot committed" + (P.editSlot === g.pid ? " selSlot" : "");
+    box.style.borderColor = p ? p.color : PAT_DEFAULT_COLOR;
+    box.textContent = `${p ? p.name : "?"}${g.len > 1 ? ` (${slot + 1}–${slot + g.len})` : ""}`;
+    box.title = p ? `${p.name} · bars ${slot + 1}–${slot + g.len} · ${p.sig} ♩=${p.tempo} · ${fmt(p.span)} s — click to rename / recolor` : "";
+    const pid = g.pid;
+    box.addEventListener("click", () => { P.editSlot = P.editSlot === pid ? null : pid; renderAll(); });
+    r2.append(box);
+    slot += g.len;
+  });
+  for (let i = used; i < PAT_SLOTS; i++) {
+    const inGroup = i >= used && i < used + P.groupLen;
+    const box = document.createElement("div");
+    box.className = "patSlot" +
+      (inGroup ? " currentSlot" : i > used + P.groupLen - 1 ? " lockedSlot" : "") +
+      (S.patSel.has(i) ? " selSlot" : "");
+    box.textContent = i + 1;
+    box.title = inGroup ? "current pattern (editing)" : "locked until earlier patterns are committed — select to Combine";
+    box.addEventListener("click", () => {
+      if (S.patSel.has(i)) S.patSel.delete(i); else S.patSel.add(i);
+      renderAll();
+    });
+    r2.append(box);
+  }
+  r2.append(mkB("Combine", false, patCombine, S.patSel.size < 2),
+            mkB("Uncombine", false, () => { S.patEdit.groupLen = 1; renderAll(); }, P.groupLen === 1));
+  el.append(r2);
+
+  /* row 3: capacity + commit */
+  const r3 = document.createElement("div"); r3.className = "row";
+  const cap = patGroupCap();
+  const evts = S.bars[0].filter(e => e.type === "note" || e.type === "rest");
+  const fill = evts.length ? Math.max(...evts.map(evEnd)) : 0;
+  const cov = patCoverage(evts, cap);
+  const meter = document.createElement("span");
+  meter.style.cssText = "font-size:12.5px;font-variant-numeric:tabular-nums;" + (cov.ok ? "color:#1b5e20;font-weight:700" : "color:#444");
+  meter.textContent = `P${P.groups.length + 1}: ${P.groupLen} bar${P.groupLen === 1 ? "" : "s"} · filled ${fmt(fill)} / ${fmt(cap)} s${cov.ok ? " ✓ complete" : ""}`;
+  r3.append(meter, mkB(`Commit P${P.groups.length + 1}`, cov.ok, patCommit, !cov.ok || used >= PAT_SLOTS));
+  if (used >= PAT_SLOTS) { const d = document.createElement("span"); d.style.cssText = "font-size:11px;color:#999"; d.textContent = "set full (16 bars used)"; r3.append(d); }
+  el.append(r3);
+
+  /* row 4: note shape (entry default + apply to selection) */
+  const r4 = document.createElement("div"); r4.className = "row";
+  r4.append(lab("Note shape"));
+  [["Regular", "regular"], ["Staccato", "staccato"], ["Elongated", "elongated"]].forEach(([labTxt, key]) =>
+    r4.append(mkB(labTxt, S.noteShape === key, () => { S.noteShape = key; renderAll(); })));
+  r4.append(mkB("Apply to selection", false, () => {
+    const ids = anySelIds();
+    if (!ids.length) { flash("Select notes on the staff first (▣ Select or Stencil selection)."); return; }
+    ids.forEach(id => { const f = findEv(id); if (f && f.ev.type === "note") {
+      if (S.noteShape === "regular") delete f.ev.shape; else f.ev.shape = S.noteShape;
+    } });
+    flash(`Shape "${S.noteShape}" applied to ${ids.length} note${ids.length === 1 ? "" : "s"}.`);
+    renderAll();
+  }));
+  el.append(r4);
+
+  /* row 5: rename / recolor a committed pattern */
+  if (P.editSlot != null) {
+    const p = patById(P.editSlot);
+    if (p) {
+      const r5 = document.createElement("div"); r5.className = "row";
+      r5.append(lab("Pattern"));
+      const nin = document.createElement("input");
+      nin.type = "text"; nin.value = p.name; nin.style.width = "90px";
+      nin.addEventListener("change", () => { p.name = nin.value.trim() || p.name; patStore(); renderAll(); });
+      const cin = document.createElement("input");
+      cin.type = "color"; cin.value = p.color;
+      cin.title = "Box color — changes every instance of this pattern in the composition";
+      cin.addEventListener("change", () => { p.color = cin.value; patStore(); renderAll(); });
+      r5.append(nin, cin);
+      const note = document.createElement("span");
+      note.style.cssText = "font-size:11px;color:#999";
+      note.textContent = "color applies to all instances of this pattern";
+      r5.append(note);
+      el.append(r5);
+    }
+  }
+
+  /* row 6: add to composition */
+  if (S.patterns.length) {
+    const r6 = document.createElement("div"); r6.className = "row";
+    r6.append(lab("Add to composition"));
+    const psel = document.createElement("select");
+    psel.className = "pitchSel";
+    S.patterns.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p.pid; o.textContent = `${p.name} (${fmt(p.span)} s)`;
+      psel.append(o);
+    });
+    const bin = document.createElement("input");
+    bin.type = "text"; bin.inputMode = "numeric"; bin.value = "1"; bin.style.width = "44px";
+    bin.title = "target bar number";
+    const evn = document.createElement("input");
+    evn.type = "text"; evn.inputMode = "numeric"; evn.value = ""; evn.placeholder = "n"; evn.style.width = "40px";
+    evn.title = "optional: repeat every n bars";
+    r6.append(psel, lab("bar"), bin, lab("every"), evn,
+      mkB("Add", true, () => {
+        const pid = +psel.value;
+        const bi = Math.max(1, parseInt(bin.value, 10) || 1) - 1;
+        const n = parseInt(evn.value, 10) || 0;
+        if (bi >= S.patEdit.snapshot.bars.length) { flash(`The composition has ${S.patEdit.snapshot.bars.length} bar(s).`); return; }
+        const added = patInsertIntoSnapshot(pid, bi, n);
+        flash(`Added ${added} instance${added === 1 ? "" : "s"} — you'll see them when you exit the studio.`);
+      }));
+    el.append(r6);
+  }
+}
+
 function renderTonal() {
   const el = $("tonalPanel");
-  if (S.notation !== "tonal") { el.style.display = "none"; el.replaceChildren(); return; }
+  if (S.notation !== "tonal" || S.patEdit) { el.style.display = "none"; el.replaceChildren(); return; }
   el.style.display = "block";
   el.replaceChildren();
   const row = document.createElement("div");
@@ -4010,7 +4563,7 @@ function renderSaved() {
 
 function renderAll() {
   renderControls(); renderBarNav(); renderStatus();
-  renderMenus(); renderBarGrid(); renderTonal(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
+  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
 }
 
 /* ─────────────── wiring ─────────────── */
@@ -4391,6 +4944,26 @@ function renderMenus() {
       if (S.voice !== key) { S.voice = key; renderAll(); previewTone(69, 0.9); }
     }, { radio: S.voice === key })));
   dd.append(mSep(), mItem("Sampler…", openSamplerModal));
+  /* Patterns */
+  const dp = $("ddPatterns");
+  dp.replaceChildren();
+  dp.append(mItem(S.patEdit ? "Exit Pattern Studio" : "Open Pattern Studio…",
+    () => { S.patEdit ? exitPatternStudio() : enterPatternStudio(); }, { check: !!S.patEdit }));
+  dp.append(mSep(), mHead(`Library (${S.patterns.length})`));
+  if (!S.patterns.length) {
+    const d0 = document.createElement("div");
+    d0.className = "mrowi"; d0.style.cssText = "font-size:11px;color:#888";
+    d0.textContent = "no committed patterns yet";
+    dp.append(d0);
+  } else S.patterns.slice(0, 10).forEach(p => {
+    const d = document.createElement("div");
+    d.className = "mrowi";
+    d.style.cssText = "font-size:12px";
+    const sw = document.createElement("span");
+    sw.style.cssText = `display:inline-block;width:12px;height:12px;border:2px solid ${p.color};border-radius:2px`;
+    d.append(sw, document.createTextNode(` ${p.name} · ${p.nbars} bar${p.nbars === 1 ? "" : "s"} · ${fmt(p.span)} s`));
+    dp.append(d);
+  });
   /* dynamic labels in static menus */
   $("mPause").textContent = S.paused ? "▶ Resume" : "⏸ Pause";
   $("mPause").disabled = !S.playing;
@@ -4465,6 +5038,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
 }
 
 /* init */
+patLoad();
 applySpacing();
 if (typeof indexedDB !== "undefined") loadSamplesFromDB();
 renderKeys(true);
