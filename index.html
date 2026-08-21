@@ -216,8 +216,6 @@
         <button class="mitem" id="mExportAll">Export all (bundle)</button>
         <button class="mitem" id="mCopyAll">Copy all to clipboard</button>
         <button class="mitem" id="mPaste">Paste import…</button>
-        <div class="msep"></div>
-        <button class="mitem" id="mExit">Exit</button>
       </div>
     </div>
     <div class="menu" data-m="edit"><button>Edit</button>
@@ -225,13 +223,6 @@
         <button class="mitem" id="mUndo">↶ Undo</button>
         <div class="msep"></div>
         <button class="mitem" id="mTranspose">♪± Transpose…</button>
-        <div class="msep"></div>
-        <button class="mitem" id="mCut">✂ Cut</button>
-        <button class="mitem" id="mCopy">⧉ Copy</button>
-        <button class="mitem" id="mPasteEv">📋 Paste</button>
-        <div class="msep"></div>
-        <button class="mitem" id="mDelSel">Delete Selection</button>
-        <button class="mitem" id="mDelBarE">Delete Bar</button>
         <div class="msep"></div>
         <button class="mitem" id="mGaps">⇥ Close gaps in bar</button>
         <button class="mitem" id="mTrim">⇤ Trim bar starts</button>
@@ -1010,11 +1001,6 @@ function undo() {
       }
     });
     flash("Trim undone.");
-  } else if (a.kind === "delgroup") {
-    a.items.forEach(it => {
-      if (S.bars[it.barIdx]) S.bars[it.barIdx].push(it.ev);
-    });
-    flash("Deletion undone.");
   } else if (a.kind === "patmove") {
     const f = findEv(a.id);
     if (f) { f.ev.start = a.oldStart; f.ev.tr = a.oldTr; }
@@ -1972,12 +1958,6 @@ function eventClicked(ev, clickX, clickY, toneMidi) {
     return;
   }
   if (S.gapRestMode) { flash("That's a note — click the empty gap beside it."); return; }
-  /* plain click on the already-selected event deselects it */
-  if (!MODES.some(k => S[k]) && S.selectedId === ev.id) {
-    S.selectedId = null; S.selectedMidi = null;
-    renderAll();
-    return;
-  }
   if (ev.type === "pattern" && !S.deleteMode && !S.grabMode) {
     if (S.colorMode) { flash("Pattern colors are set in the Pattern Studio (they apply to all instances)."); return; }
     if (S.dragMode || S.timeAdjust || S.mergeMode || S.quantMode || S.selMode || S.stencilMode) {
@@ -2362,7 +2342,7 @@ window.addEventListener("pointerup", () => {
 let gdrag = null;   // { ids, startX, startY, px, orig: Map, shiftLo, offLo, offHi, moved }
 let selClickSuppressUntil = 0;
 
-function beginGroupDrag(e, originId) {
+function beginGroupDrag(e) {
   const ids = [...S.groupSel].filter(id => { const f = findEv(id); return f && f.bi === S.barIdx; });
   if (!ids.length) return;
   const orig = new Map();
@@ -2381,7 +2361,7 @@ function beginGroupDrag(e, originId) {
       offHi = Math.min(offHi, BASS_MAX - ev.midi);
     }
   });
-  gdrag = { ids, originId, startX: e.clientX, startY: e.clientY, px: lastPxPerSec, orig,
+  gdrag = { ids, startX: e.clientX, startY: e.clientY, px: lastPxPerSec, orig,
     shiftLo: -minStart, offLo: pitched ? offLo : 0, offHi: pitched ? offHi : 0, moved: false };
   $("staff").setAttribute("width", +$("staff").getAttribute("width") + 800);
 }
@@ -2418,7 +2398,7 @@ function updateGroupVisuals() {
 }
 window.addEventListener("pointermove", e => {
   if (!gdrag) return;
-  const shift = e.ctrlKey ? 0 : Math.max(gdrag.shiftLo, (e.clientX - gdrag.startX) / gdrag.px);
+  const shift = Math.max(gdrag.shiftLo, (e.clientX - gdrag.startX) / gdrag.px);
   const off = Math.max(gdrag.offLo, Math.min(-Math.round((e.clientY - gdrag.startY) / STEP), gdrag.offHi));
   if (Math.abs(e.clientX - gdrag.startX) + Math.abs(e.clientY - gdrag.startY) > 4) gdrag.moved = true;
   gdrag.ids.forEach(id => {
@@ -2431,7 +2411,7 @@ window.addEventListener("pointermove", e => {
   updateGroupVisuals();
   const rct = $("staff").getBoundingClientRect();
   showHoverAt(e.clientX - rct.left, e.clientY - rct.top,
-    `${e.ctrlKey ? "⏱🔒 " : ""}Δ${shift >= 0 ? "+" : ""}${fmt(shift)} s · ${off >= 0 ? "+" : ""}${off} st`);
+    `Δ${shift >= 0 ? "+" : ""}${fmt(shift)} s · ${off >= 0 ? "+" : ""}${off} st`);
 });
 window.addEventListener("pointerup", () => {
   if (!gdrag) return;
@@ -2448,11 +2428,6 @@ window.addEventListener("pointerup", () => {
     undoStack.push({ kind: "groupmove", items });
     if (undoStack.length > 100) undoStack.shift();
     flash(`Moved ${g.ids.length} event${g.ids.length === 1 ? "" : "s"} as a group.`);
-  } else if (g.originId != null) {
-    /* an unmoved press is a click: toggle that note out of (or into) the group —
-       preventDefault on pointerdown suppresses the native click, so do it here */
-    if (S.groupSel.has(g.originId)) S.groupSel.delete(g.originId);
-    else S.groupSel.add(g.originId);
   }
   renderAll();
 });
@@ -2464,48 +2439,8 @@ function groupItemsSnapshot(ids) {
 function groupIds() {
   return [...S.groupSel].filter(id => { const f = findEv(id); return f && f.bi === S.barIdx; });
 }
-function groupAllIds() {
-  return [...S.groupSel].filter(id => findEv(id));
-}
-function selectBarsRange(a, b) {
-  for (let i = a; i <= b && i < S.bars.length; i++)
-    S.bars[i].forEach(e => S.groupSel.add(e.id));
-  renderAll();
-}
-function openSelectBarsModal() {
-  const body = document.createElement("div");
-  body.className = "mrow";
-  const line = document.createElement("div");
-  line.className = "mline";
-  const lab = t => { const x = document.createElement("span"); x.style.cssText = "font-size:12px"; x.textContent = t; return x; };
-  const a = document.createElement("input"), b = document.createElement("input");
-  a.type = b.type = "text"; a.inputMode = b.inputMode = "numeric";
-  a.value = "1"; b.value = String(S.bars.length);
-  a.style.width = b.style.width = "48px";
-  const err = document.createElement("div");
-  err.style.cssText = "color:#c62828;font-size:12px;min-height:14px";
-  const go = document.createElement("button");
-  go.className = "btn active";
-  go.textContent = "Select";
-  go.addEventListener("click", () => {
-    const ai = parseInt(a.value, 10), bi = parseInt(b.value, 10);
-    if (isNaN(ai) || isNaN(bi) || ai < 1 || bi < ai || bi > S.bars.length) {
-      err.textContent = `Enter a valid range 1–${S.bars.length}.`; return;
-    }
-    closeModal();
-    selectBarsRange(ai - 1, bi - 1);
-    flash(`Selected everything in bars ${ai}–${bi}.`);
-  });
-  const cancel = document.createElement("button");
-  cancel.className = "btn";
-  cancel.textContent = "Cancel";
-  cancel.addEventListener("click", closeModal);
-  line.append(lab("Bars"), a, lab("to"), b, go, cancel);
-  body.append(line, err);
-  showModal("Select all (bars…)", body);
-}
 function groupSetDur(newDur) {
-  const ids = groupAllIds();
+  const ids = groupIds();
   if (!ids.length) { flash("Select some notes first."); return; }
   const d = Math.max(0.01, r3(newDur));
   pushUndo({ kind: "setdur", items: groupItemsSnapshot(ids) });
@@ -2514,67 +2449,12 @@ function groupSetDur(newDur) {
   renderAll();
 }
 function groupStepDur(delta) {
-  const ids = groupAllIds();
+  const ids = groupIds();
   if (!ids.length) { flash("Select some notes first."); return; }
   pushUndo({ kind: "setdur", items: groupItemsSnapshot(ids) });
   ids.forEach(id => { const f = findEv(id); if (f) f.ev.dur = Math.max(0.01, r3(f.ev.dur + delta)); });
   renderAll();
 }
-/* ── edit clipboard: Cut / Copy / Paste on the current-bar selection ── */
-let evClipboard = null;   // [{type, dur, midis?, midi?, color?, vel?, shape?, gapRest?, rel}] rel = start offset
-function snapshotEv(ev) {
-  const c = { type: ev.type, dur: ev.dur };
-  if (ev.midis) c.midis = [...ev.midis];
-  if (ev.midi != null) c.midi = ev.midi;
-  if (ev.color) c.color = ev.color;
-  if (ev.vel != null) c.vel = ev.vel;
-  if (ev.shape) c.shape = ev.shape;
-  if (ev.gapRest) c.gapRest = true;
-  if (ev.type === "pattern") { c.pid = ev.pid; c.pmode = ev.pmode; c.pcount = ev.pcount; c.tr = ev.tr; }
-  return c;
-}
-function editCopy() {
-  const ids = groupIds().length ? groupIds() : (S.selectedId != null && findEv(S.selectedId) ? [S.selectedId] : []);
-  if (!ids.length) { flash("Nothing selected in this bar to copy — use ▣ Select (or click a note) first."); return false; }
-  const evs = ids.map(id => findEv(id).ev).sort((a, b) => a.start - b.start || a.id - b.id);
-  const base = evs[0].start;
-  evClipboard = evs.map(ev => Object.assign(snapshotEv(ev), { rel: r3(ev.start - base) }));
-  flash(`Copied ${evs.length} event${evs.length === 1 ? "" : "s"}.`);
-  return true;
-}
-function deleteIds(ids, label) {
-  const found = ids.map(id => findEv(id)).filter(Boolean);
-  if (!found.length) { flash("Nothing selected to delete."); return; }
-  const items = found.map(fx => ({ barIdx: fx.bi, ev: JSON.parse(JSON.stringify(fx.ev)) }));
-  const del = new Set(ids);
-  S.bars = S.bars.map(b2 => b2.filter(e => !del.has(e.id)));
-  ids.forEach(id => { S.groupSel.delete(id); if (S.selectedId === id) S.selectedId = null; });
-  pushUndo({ kind: "delgroup", items });
-  flash(`${label}: removed ${found.length} event${found.length === 1 ? "" : "s"}.`);
-  renderAll();
-}
-function editCut() {
-  const ids = groupIds().length ? groupIds() : (S.selectedId != null && findEv(S.selectedId) ? [S.selectedId] : []);
-  if (!editCopy()) return;
-  deleteIds(ids, "Cut");
-}
-function editPasteEv() {
-  if (!evClipboard || !evClipboard.length) { flash("The clipboard is empty — Cut or Copy a selection first."); return; }
-  const at = melodyCursor(bar()) === 0 && bar().length === 0 ? 0
-    : (bar().length ? Math.max(...bar().map(evEnd)) : 0);
-  const newIds = [];
-  evClipboard.forEach(c => {
-    const ev = Object.assign({}, c, { id: idCounter++, start: r3(at + c.rel) });
-    delete ev.rel;
-    S.bars[S.barIdx].push(ev);
-    newIds.push(ev.id);
-  });
-  pushUndo({ kind: "dupgroup", barIdx: S.barIdx, ids: newIds });
-  S.groupSel = new Set(newIds);
-  flash(`Pasted ${newIds.length} event${newIds.length === 1 ? "" : "s"} at ${fmt(at)} s (selected).`);
-  renderAll();
-}
-
 /* ── transpose: 2nds through octave, up or down; selection / bar / all bars ── */
 const INTERVALS = [
   ["Minor 2nd", 1], ["Major 2nd", 2], ["Minor 3rd", 3], ["Major 3rd", 4],
@@ -2582,7 +2462,7 @@ const INTERVALS = [
   ["Major 6th", 9], ["Minor 7th", 10], ["Major 7th", 11], ["Octave", 12],
 ];
 function anySelIds() {
-  const g = groupAllIds();
+  const g = groupIds();
   if (g.length) return g;
   return stencilIds();
 }
@@ -2732,7 +2612,7 @@ function dupGroup() {
   renderAll();
 }
 function groupMute(val) {
-  const ids = groupAllIds().filter(id => findEv(id).ev.type !== "rest");
+  const ids = groupIds().filter(id => findEv(id).ev.type !== "rest");
   if (!ids.length) { flash("Select some notes or bass tones first."); return; }
   const items = [];
   ids.forEach(id => {
@@ -2902,8 +2782,7 @@ window.addEventListener("pointermove", e => {
   const f = findEv(grab.id);
   if (!f) { grab = null; return; }
   const ev = f.ev;
-  ev.start = e.ctrlKey ? grab.origStart
-    : r3(Math.max(0, grab.origStart + (e.clientX - grab.startX) / grab.pxPerSec));
+  ev.start = r3(Math.max(0, grab.origStart + (e.clientX - grab.startX) / grab.pxPerSec));
   const off = -Math.round((e.clientY - grab.startY) / STEP);
   if (ev.type === "note") {
     const lo = Math.min(...grab.origMidis), hi = Math.max(...grab.origMidis);
@@ -2930,10 +2809,6 @@ window.addEventListener("pointerup", () => {
     const moved = ev.start !== g.origStart ||
       (g.origMidis && ev.midis.some((m, i) => m !== g.origMidis[i])) ||
       (g.origMidi != null && ev.midi !== g.origMidi);
-    if (!moved) {
-      S.selectedId = S.selectedId === g.id ? null : g.id;
-      renderAll();
-    }
     if (moved) {
       undoStack.push({ kind: "move", id: g.id, oldStart: g.origStart,
         oldMidis: g.origMidis ? [...g.origMidis] : null,
@@ -2952,7 +2827,6 @@ function penInsert(clickX, clickY) {
   let dur = parseFloat(String($("penDur").value).trim().replace(",", "."));
   if (isNaN(dur) || dur < 0.01) dur = 0.5;
   let snapped = false;
-  if (!bar().length) { t = 0; snapped = t !== 0 ? snapped : snapped; }
   if (!S.penAnywhere) {
     /* no-gap placement: the entry begins where the preceding sound stops —
        the latest end among events starting at/before the click (0 if none) */
@@ -3130,7 +3004,7 @@ function renderStaff() {
         if (S.playing || gdrag || !S.groupSel.has(ev.id)) return;
         e.stopPropagation(); e.preventDefault();
         try { shape.setPointerCapture(e.pointerId); } catch (err) {}
-        beginGroupDrag(e, ev.id);
+        beginGroupDrag(e);
       });
       if (S.grabMode) shape.addEventListener("pointerdown", e => {
         if (S.playing || grab) return;
@@ -3750,33 +3624,17 @@ function renderSel() {
   if (!S.selMode) { el.style.display = "none"; el.replaceChildren(); return; }
   el.style.display = "block";
   el.replaceChildren();
-  const mk = (txt, fn, dis) => {
-    const b = document.createElement("button");
-    b.className = "btn small";
-    b.textContent = txt;
-    b.disabled = !!dis;
-    b.addEventListener("click", fn);
-    return b;
-  };
   const ids = groupIds();
   const evs = ids.map(id => findEv(id).ev);
 
-  const allIds = groupAllIds();
   const row1 = document.createElement("div");
   row1.className = "row";
   const who = document.createElement("span");
   who.className = "who";
-  who.textContent = allIds.length
-    ? `Selected ${allIds.length}${allIds.length !== ids.length ? ` (${ids.length} in this bar)` : ""}: ${evs.slice(0, 5).map(evLabel).join(", ")}${allIds.length > 5 ? "…" : ""}`
+  who.textContent = ids.length
+    ? `Selected ${ids.length}: ${evs.slice(0, 6).map(evLabel).join(", ")}${evs.length > 6 ? "…" : ""}`
     : "Select — click notes on the staff to build a group.";
-  row1.append(who,
-    mk("All (this bar)", () => { bar().forEach(e => S.groupSel.add(e.id)); renderAll(); }, !bar().length),
-    mk("All (bars…)", openSelectBarsModal, S.bars.length < 1),
-    mk("All (composition)", () => {
-      S.bars.forEach(b2 => b2.forEach(e => S.groupSel.add(e.id)));
-      renderAll();
-      flash(`Selected all ${groupAllIds().length} events in the composition.`);
-    }, !S.bars.some(b2 => b2.length)));
+  row1.append(who);
   if (ids.length) {
     const hint = document.createElement("span");
     hint.style.cssText = "font-size:11px;color:#999";
@@ -3787,6 +3645,14 @@ function renderSel() {
 
   const row2 = document.createElement("div");
   row2.className = "row";
+  const mk = (txt, fn, dis) => {
+    const b = document.createElement("button");
+    b.className = "btn small";
+    b.textContent = txt;
+    b.disabled = !!dis;
+    b.addEventListener("click", fn);
+    return b;
+  };
   const anyUnmuted = evs.some(e => e.type !== "rest" && !e.muted);
   const anyMuted = evs.some(e => e.muted);
   row2.append(
@@ -3849,20 +3715,17 @@ function patUsedSlots() { return S.patEdit.groups.reduce((a, g) => a + g.len, 0)
 function patCoverage(evts, cap) {
   if (!evts.length) return { ok: false, msg: "The pattern is empty." };
   const sorted = [...evts].sort((a, b) => a.start - b.start);
-  /* ms-rounded entries accumulate up to ~1–2 ms of drift EACH, so the
-     end tolerance scales with the entry count (never below 12 ms) */
-  const tol = Math.max(0.012, sorted.length * 0.002);
   let frontier = 0;
   for (const ev of sorted) {
-    if (ev.start > frontier + 0.006)
-      return { ok: false, msg: `Gap at ${fmt(frontier)}–${fmt(ev.start)} s — fill it with a rest (all entries are manual; the ⌷ Gap→Rest tool clicks it closed).` };
+    if (ev.start > frontier + 0.003)
+      return { ok: false, msg: `Gap at ${fmt(frontier)}–${fmt(ev.start)} s — fill it with a rest (all entries are manual).` };
     frontier = Math.max(frontier, evEnd(ev));
   }
-  if (frontier < cap - tol)
+  if (frontier < cap - 0.003)
     return { ok: false, msg: `Filled ${fmt(frontier)} of ${fmt(cap)} s — the time signature isn't complete.` };
-  if (frontier > cap + tol)
+  if (frontier > cap + 0.003)
     return { ok: false, msg: `Content runs ${fmt(frontier)} s — ${fmt(frontier - cap)} s past the bar${S.patEdit.groupLen > 1 ? " group" : ""}. Trim it to exactly ${fmt(cap)} s.` };
-  return { ok: true, frontier };
+  return { ok: true };
 }
 function enterPatternStudio() {
   if (S.patEdit) return;
@@ -3915,12 +3778,6 @@ function patCommit() {
   const evts = S.bars[0].filter(e => e.type === "note" || e.type === "rest");
   const cov = patCoverage(evts, cap);
   if (!cov.ok) { flash(cov.msg); return; }
-  /* snap to mathematical exactness: absorb rounding drift into the final event */
-  const drift = r3(cap - cov.frontier);
-  if (Math.abs(drift) > 0.0005) {
-    const last = [...evts].sort((a, b) => evEnd(a) - evEnd(b)).pop();
-    last.dur = r3(Math.max(0.01, last.dur + drift));
-  }
   const n = S.patEdit.groups.length + 1;
   const pat = {
     pid: Date.now(),
@@ -4947,26 +4804,7 @@ $("midiChordBtn").addEventListener("click", () => {
                          : "Chord grouping off — every key records its own event.");
   renderControls();
 });
-$("clearBtn").addEventListener("click", () => {
-  const body = document.createElement("div");
-  body.className = "mrow";
-  const warn = document.createElement("div");
-  warn.style.cssText = "font-size:13px";
-  warn.textContent = "This will delete all entries. Proceed?";
-  const line = document.createElement("div");
-  line.className = "mline";
-  const yes = document.createElement("button");
-  yes.className = "btn active";
-  yes.textContent = "Yes";
-  yes.addEventListener("click", () => { closeModal(); clearAll(); });
-  const no = document.createElement("button");
-  no.className = "btn";
-  no.textContent = "No";
-  no.addEventListener("click", closeModal);
-  line.append(yes, no);
-  body.append(warn, line);
-  showModal("Clear all", body);
-});
+$("clearBtn").addEventListener("click", clearAll);
 $("volSlider").addEventListener("input", e => { S.volume = +e.target.value; });
 $("prevBarBtn").addEventListener("click", () => gotoBar(S.barIdx - 1));
 $("nextBarBtn").addEventListener("click", () => gotoBar(S.barIdx + 1));
@@ -5203,36 +5041,7 @@ const proxy = (mid, target) => $(mid).addEventListener("click", () => $(target).
 proxy("mSave", "saveBtn"); proxy("mExport", "exportBtn"); proxy("mImport", "importBtn");
 proxy("mExportAll", "exportAllBtn"); proxy("mCopyAll", "copyAllBtn"); proxy("mPaste", "pasteBtn");
 proxy("mUndo", "undoBtn");
-$("mTranspose").addEventListener("click", openTransposeModal);
-$("mCut").addEventListener("click", editCut);
-$("mCopy").addEventListener("click", editCopy);
-$("mPasteEv").addEventListener("click", editPasteEv);
-$("mDelSel").addEventListener("click", () => deleteIds(groupAllIds(), "Delete Selection"));
-proxy("mDelBarE", "delBarBtn");
-$("mExit").addEventListener("click", () => {
-  const body = document.createElement("div");
-  body.className = "mrow";
-  const t = document.createElement("div");
-  t.style.cssText = "font-size:13px";
-  t.textContent = "Exit Sine Tone Composer? Saved compositions stay in this browser.";
-  const line = document.createElement("div");
-  line.className = "mline";
-  const go = document.createElement("button");
-  go.className = "btn active";
-  go.textContent = "Exit";
-  go.addEventListener("click", () => {
-    closeModal();
-    window.close();
-    setTimeout(() => { try { location.href = "about:blank"; } catch (e) {} }, 150);
-  });
-  const cancel = document.createElement("button");
-  cancel.className = "btn";
-  cancel.textContent = "Cancel";
-  cancel.addEventListener("click", closeModal);
-  line.append(go, cancel);
-  body.append(t, line);
-  showModal("Exit", body);
-}); proxy("mGaps", "gapsBtn"); proxy("mTrim", "trimBtn"); proxy("mClear", "clearBtn");
+$("mTranspose").addEventListener("click", openTransposeModal); proxy("mGaps", "gapsBtn"); proxy("mTrim", "trimBtn"); proxy("mClear", "clearBtn");
 proxy("mPlayAll", "playAllBtn"); proxy("mPlayBar", "playBarBtn"); proxy("mPlayFrom", "playFromBtn");
 proxy("mPause", "pauseBtn"); proxy("mStop", "stopBtn");
 proxy("mPrevBar", "prevBarBtn"); proxy("mNextBar", "nextBarBtn");
