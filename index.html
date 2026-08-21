@@ -2340,18 +2340,19 @@ function attachTap(el, fn, isRoot) {
     const dt = performance.now() - t0, dist = Math.hypot(e.clientX - sx, e.clientY - sy);
     if (dt > 900) { ttrace(`pu ${isRoot ? "staff" : "el"}: too slow ${Math.round(dt)}ms`); return; }
     if (dist > 10) { ttrace(`pu ${isRoot ? "staff" : "el"}: moved ${Math.round(dist)}px`); return; }
-    ttrace(`pu ${isRoot ? "staff" : "el"}: TAP ${Math.round(dt)}ms`);
     /* IMPORTANT: no stopPropagation here — window-level pointerup handlers
        must always run (they end grabs/drags). Dedup is done by claiming. */
     if (isRoot && performance.now() - tapClaim < 90) return;
-    if (!isRoot) tapClaim = performance.now();
-    el.__tapTs = performance.now();
+    tapClaim = performance.now();
+    ttrace(`pu ${isRoot ? "staff" : "el"}: TAP ${Math.round(dt)}ms`);
     fn(e);
   });
   el.addEventListener("click", e => {
-    if (el.__tapTs && performance.now() - el.__tapTs < 400) return;
-    if (isRoot && performance.now() - tapClaim < 400) return;
-    if (!isRoot) tapClaim = performance.now();
+    /* global claim, not element identity: a re-render between pointerup and
+       click rebuilds the staff, and mobile Chrome retargets the synthesized
+       click to the NEW element — an element-local stamp can't catch that */
+    if (performance.now() - tapClaim < 400) { ttrace(`click ${isRoot ? "staff" : "el"}: deduped`); return; }
+    tapClaim = performance.now();
     ttrace(`click ${isRoot ? "staff" : "el"}: fired`);
     fn(e);
   });
@@ -5532,7 +5533,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 26;
+const BUILD = 27;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
