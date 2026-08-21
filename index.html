@@ -1048,6 +1048,12 @@ function undo() {
       if (f) { if (it.old) f.ev.muted = true; else delete f.ev.muted; }
     });
     flash("Mute change undone.");
+  } else if (a.kind === "shape") {
+    a.items.forEach(it => {
+      const f = findEv(it.id);
+      if (f) { if (it.old) f.ev.shape = it.old; else delete f.ev.shape; }
+    });
+    flash("Shape change undone.");
   } else if (a.kind === "quantize") {
     const b = S.bars[a.barIdx];
     if (b) {
@@ -1986,7 +1992,7 @@ function eventClicked(ev, clickX, clickY, toneMidi) {
     renderAll();
     return;
   }
-  if (ev.type === "pattern" && !S.deleteMode && !S.grabMode) {
+  if (ev.type === "pattern" && !S.deleteMode && !S.grabMode && !S.selMode) {
     if (S.colorMode) { flash("Pattern colors are set in the Pattern Studio (they apply to all instances)."); return; }
     if (S.dragMode || S.timeAdjust || S.mergeMode || S.quantMode || S.selMode || S.stencilMode) {
       flash("Patterns are absolute — transpose them or drag them along time with ✋ Grab."); return;
@@ -3381,78 +3387,58 @@ function renderStaff() {
       "font-size": 9.5, fill: "#999", "pointer-events": "none" }, `⌷ ${fmt(g.e - g.s)} s`));
   });
 
-  /* pattern instances: colored box, name, loop-mode + transport buttons, inner tones */
-  bar().forEach(ev => {
-    if (ev.type !== "pattern") return;
-    const p = patById(ev.pid);
-    const x = X(ev.start);
-    const w = Math.max(patInstSpan(ev) * pxPerSec, 40);
-    const col = p ? p.color : PAT_DEFAULT_COLOR;
-    const boxTop = PAD_T - 2, boxBot = STAFF_H - PAD_B + 2;
-    const box = svgEl("rect", { x, y: boxTop, width: w, height: boxBot - boxTop,
-      fill: "none", stroke: col, "stroke-width": 2.5, rx: 5,
-      opacity: ev.muted ? 0.35 : 1, "data-ev": ev.id });
-    box.style.cursor = S.grabMode ? "move" : "pointer";
-    attachTap(box, e => {
-      const rect = svg.getBoundingClientRect();
-      eventClicked(ev, e.clientX - rect.left, e.clientY - rect.top, null);
-    });
-    if (S.grabMode) box.addEventListener("pointerdown", e => {
-      if (S.playing || grab) return;
-      e.stopPropagation(); e.preventDefault();
-      try { box.setPointerCapture(e.pointerId); } catch (err) {}
-      beginPatGrab(ev, e);
-    });
-    svg.append(box);
-    /* inner tones (display only) */
-    if (p) p.events.forEach(pe => {
-      if (pe.type !== "note") return;
-      pe.midis.forEach(m => {
-        const mm = m + (ev.tr || 0);
-        if (mm < MIDI_MIN || mm > MIDI_MAX) return;
-        svg.append(svgEl("rect", {
-          x: X(ev.start + pe.start), y: yOfMidi(mm) - 3,
-          width: Math.max(pe.dur * pxPerSec - 1, 3), height: 6,
-          fill: col, opacity: 0.75, rx: 2, "pointer-events": "none" }));
+  /* pattern instances: a translucent ghost band shows the extent but intercepts
+     NOTHING (notes can be entered beneath it) + a compact chip that drags the
+     instance and taps open to its controls */
+  {
+    const lanes = [];
+    bar().filter(e => e.type === "pattern").sort((a, b) => a.start - b.start).forEach(ev => {
+      const p = patById(ev.pid);
+      const x = X(ev.start);
+      const w = Math.max(patInstSpan(ev) * pxPerSec, 24);
+      const col = p ? p.color : "#888";
+      svg.append(svgEl("rect", { x, y: PAD_T, width: w, height: STAFF_H - PAD_T - PAD_B,
+        fill: col, opacity: ev.muted ? 0.04 : 0.08, "pointer-events": "none" }));
+      svg.append(svgEl("rect", { x, y: PAD_T, width: w, height: STAFF_H - PAD_T - PAD_B,
+        fill: "none", stroke: col, "stroke-width": 1.2, "stroke-dasharray": "5 4", rx: 4,
+        opacity: ev.muted ? 0.3 : 0.55, "pointer-events": "none" }));
+      if (p) p.events.forEach(pe => {
+        if (pe.type !== "note") return;
+        pe.midis.forEach(m => {
+          const mm = m + (ev.tr || 0);
+          if (mm < MIDI_MIN || mm > MIDI_MAX) return;
+          svg.append(svgEl("rect", { x: X(ev.start + pe.start), y: yOfMidi(mm) - 3,
+            width: Math.max(pe.dur * pxPerSec - 1, 3), height: 6,
+            fill: col, opacity: 0.75, rx: 2, "pointer-events": "none" }));
+        });
       });
+      let lane = 0;
+      while (lane < lanes.length && lanes[lane] > x + 2) lane++;
+      const chipW = Math.max(64, Math.min(w, 150));
+      lanes[lane] = x + chipW + 6;
+      const cy = PAD_T + 2 + lane * 21;
+      const chip = svgEl("rect", { x, y: cy, width: chipW, height: 17, rx: 4,
+        fill: col, stroke: "#000", "stroke-width": 1, opacity: ev.muted ? 0.45 : 1, "data-ev": ev.id });
+      chip.style.cursor = "grab";
+      const trTag = ev.tr ? ` ${ev.tr > 0 ? "+" : ""}${ev.tr}` : "";
+      const modeTag = ev.pmode === "li" ? " Li∞" : ev.pmode === "lo" ? ` Lo×${ev.pcount || 1}` : "";
+      const tfill = isLight(col) ? "#000" : "#fff";
+      svg.append(chip, svgEl("text", { x: x + 5, y: cy + 12.5, "font-size": 9.5, "font-weight": 700,
+        fill: tfill, "pointer-events": "none" }, `⧉ ${p ? p.name : "?"}${trTag}${modeTag}`));
+      chip.addEventListener("pointerdown", e => {
+        if (S.playing || grab || gdrag) return;
+        try { chip.setPointerCapture(e.pointerId); } catch (err) {}
+        beginPatGrab(ev, e);
+      });
+      attachTap(chip, e => {
+        if (S.deleteMode || S.selMode || S.grabMode) {
+          const rect = svg.getBoundingClientRect();
+          eventClicked(ev, e.clientX - rect.left, e.clientY - rect.top, null);
+        } else openPatInstanceModal(ev);
+      });
+      chip.addEventListener("contextmenu", e => { e.preventDefault(); openPatInstanceModal(ev); });
     });
-    /* header: name + mode badge + buttons */
-    const trTag = ev.tr ? ` ${ev.tr > 0 ? "+" : ""}${ev.tr}st` : "";
-    const modeTag = ev.pmode === "li" ? " · Li ∞" : ev.pmode === "lo" ? ` · Lo ×${ev.pcount || 1}` : "";
-    svg.append(svgEl("text", { x: x + 4, y: boxTop - 4, "font-size": 10, "font-weight": 700,
-      fill: col, "pointer-events": "none" }, `${p ? p.name : "?"}${trTag}${modeTag}`));
-    const mkBtn = (bx, txt, title, fn, active) => {
-      const g = svgEl("g", {});
-      const r = svgEl("rect", { x: bx, y: boxTop + 3, width: 22, height: 14, rx: 3,
-        fill: active ? col : TH().sheet, stroke: col, "stroke-width": 1.2 });
-      const t = svgEl("text", { x: bx + 11, y: boxTop + 13.5, "text-anchor": "middle",
-        "font-size": 8.5, "font-weight": 700, fill: active ? "#fff" : col, "pointer-events": "none" }, txt);
-      r.style.cursor = "pointer";
-      const tt = svgEl("title", {}); tt.textContent = title; r.append(tt);
-      r.addEventListener("click", e => { e.stopPropagation(); fn(); });
-      g.append(r, t);
-      svg.append(g);
-    };
-    let bx = x + 4;
-    mkBtn(bx, "Li", "Loop infinitely (fills the rest of the bar)", () => {
-      ev.pmode = ev.pmode === "li" ? "once" : "li"; renderAll();
-    }, ev.pmode === "li"); bx += 25;
-    mkBtn(bx, "Lo", "Play once, rest one full cycle, repeat", () => {
-      ev.pmode = ev.pmode === "lo" ? "once" : "lo";
-      if (ev.pmode === "lo" && !ev.pcount) ev.pcount = 1;
-      renderAll();
-    }, ev.pmode === "lo"); bx += 25;
-    mkBtn(bx, `×${ev.pcount || 1}`, "Repeat count for Lo (click cycles 1–8)", () => {
-      ev.pcount = ((ev.pcount || 1) % 8) + 1; renderAll();
-    }, false); bx += 25;
-    mkBtn(bx, "▶", "Preview this pattern instance", () => patPreviewPlay(ev), patPrev && patPrev.evId === ev.id); bx += 25;
-    mkBtn(bx, "⏸", "Pause / resume preview", () => {
-      if (!patPrev || !audioCtx) return;
-      if (!S.paused) { audioCtx.suspend(); S.paused = true; } else { audioCtx.resume(); S.paused = false; }
-      renderStatus();
-    }, S.paused && patPrev && patPrev.evId === ev.id); bx += 25;
-    mkBtn(bx, "■", "Stop preview", patPreviewStop, false);
-  });
+  }
 
   /* harmony entry point — the vertical positioning bar */
   if (S.stencilMode && S.harmonyOn && S.harmonyT != null) {
@@ -3862,6 +3848,29 @@ function renderSel() {
       renderAll();
       flash(`Selected all ${groupAllIds().length} events in the composition.`);
     }, !S.bars.some(b2 => b2.length)));
+
+  /* note shaping — same three shapes MIDI/stencil entry uses, applied to the selection */
+  const rowSh = document.createElement("div");
+  rowSh.className = "row";
+  const shLab = document.createElement("span");
+  shLab.className = "who";
+  shLab.textContent = "Shape:";
+  const applyShape = sh => {
+    const evs2 = groupAllIds().map(id => findEv(id)).filter(x => x && x.ev.type === "note").map(x => x.ev);
+    if (!evs2.length) { flash("Select at least one note first."); return; }
+    undoStack.push({ kind: "shape", items: evs2.map(e => ({ id: e.id, old: e.shape || null })) });
+    if (undoStack.length > 100) undoStack.shift();
+    evs2.forEach(e => { if (sh) e.shape = sh; else delete e.shape; });
+    flash(sh === "staccato" ? `Staccato — ${evs2.length} note${evs2.length === 1 ? "" : "s"} now play at half duration.`
+        : sh === "elongated" ? `Elongated — ${evs2.length} note${evs2.length === 1 ? "" : "s"} now ring past their written end.`
+        : `Regular shape restored on ${evs2.length} note${evs2.length === 1 ? "" : "s"}.`);
+    renderAll();
+  };
+  rowSh.append(shLab,
+    mk("● Regular", () => applyShape(null)),
+    mk("◗ Staccato", () => applyShape("staccato")),
+    mk("─ Elongated", () => applyShape("elongated")));
+  queueMicrotask(() => el.append(rowSh));
   if (ids.length) {
     const hint = document.createElement("span");
     hint.style.cssText = "font-size:11px;color:#999";
@@ -3962,6 +3971,8 @@ function enterPatternStudio() {
     groups: Array.isArray(saved) ? saved.filter(g => patById(g.pid)) : [],
     groupLen: 1,
     editSlot: null,          // committed slot being renamed/recolored
+    combineOn: false,
+    combineSel: [],
   };
   S.bars = [[]]; S.barIdx = 0; S.loop = null;
   S.patSel.clear();
@@ -3995,6 +4006,120 @@ function patCombine() {
   flash(`Bars ${sel[0] + 1}–${sel[sel.length - 1] + 1} combined — one pattern of ${sel.length} bars (${fmt(patGroupCap())} s).`);
   renderAll();
 }
+function patMergeCommitted() {
+  const P = S.patEdit;
+  const sel = P.combineSel.map(patById).filter(Boolean);
+  if (sel.length < 2) { flash("Tap at least two shelf patterns first."); return; }
+  const nb = sel.reduce((a, p) => a + p.nbars, 0);
+  if (patUsedSlots() + nb > PAT_SLOTS) { flash(`Not enough free slots (needs ${nb}).`); return; }
+  let t = 0; const events = [];
+  sel.forEach(p => {
+    p.events.forEach(e => events.push({ type: e.type, start: r3n(e.start + t), dur: e.dur,
+      midis: e.midis ? [...e.midis] : undefined, vel: e.vel, shape: e.shape }));
+    t = r3n(t + p.span);
+  });
+  const pat = { pid: newPid(), name: `P${P.groups.length + 1}`, color: PAT_DEFAULT_COLOR,
+    tempo: sel[0].tempo, sig: sel[0].sig, nbars: nb, span: t, events };
+  S.patterns.push(pat); patStore();
+  P.groups.push({ len: nb, pid: pat.pid }); patSetStore(P.groups);
+  P.combineSel = []; P.combineOn = false;
+  flash(`${pat.name} = ${sel.map(p => p.name).join(" + ")} · ${fmt(t)} s, ${nb} bars.`);
+  renderAll();
+}
+
+function patDeletePattern(pid) {
+  const P = S.patEdit;
+  S.patterns = S.patterns.filter(q => q.pid !== pid);
+  patStore();
+  if (P) {
+    P.groups = P.groups.filter(g => g.pid !== pid);
+    patSetStore(P.groups);
+    P.combineSel = P.combineSel.filter(q => q !== pid);
+    if (P.snapshot && P.snapshot.bars)
+      P.snapshot.bars.forEach((b, i) => P.snapshot.bars[i] = b.filter(e => !(e.type === "pattern" && e.pid === pid)));
+  }
+  S.bars.forEach((b, i) => S.bars[i] = b.filter(e => !(e.type === "pattern" && e.pid === pid)));
+}
+
+function openShelfModal(pid) {
+  const p = patById(pid);
+  if (!p) return;
+  const P = S.patEdit;
+  const body = document.createElement("div");
+  const mkB = (txt, on, fn, dis) => {
+    const b = document.createElement("button");
+    b.className = "btn small" + (on ? " active" : "");
+    b.textContent = txt; b.disabled = !!dis;
+    b.addEventListener("click", fn);
+    return b;
+  };
+  const row = () => { const r = document.createElement("div"); r.className = "mline"; return r; };
+  const info = document.createElement("div");
+  info.style.cssText = "font-size:13px";
+  info.textContent = `${p.nbars} bar${p.nbars === 1 ? "" : "s"} · ${fmt(p.span)} s · ${p.sig} ♩=${p.tempo}`;
+
+  const tmp = { type: "pattern", id: -1, pid, start: 0, pmode: "once", pcount: 1, tr: 0 };
+  const r1 = row();
+  r1.append(mkB("▶", false, () => patPreviewPlay(tmp)),
+    mkB("⏸", false, () => {
+      if (!patPrev || !audioCtx) return;
+      if (!S.paused) { audioCtx.suspend(); S.paused = true; } else { audioCtx.resume(); S.paused = false; }
+      renderStatus();
+    }),
+    mkB("■", false, patPreviewStop));
+  let armLoad = false;
+  const loadB = mkB("Load into staff", false, () => {
+    if (!armLoad && S.bars[0].length) { armLoad = true; loadB.textContent = "Replace current staff content?"; return; }
+    S.bars = [p.events.map(e => ({ id: (Date.now() + Math.random()), type: e.type, start: e.start, dur: e.dur,
+      midis: e.midis ? [...e.midis] : undefined, vel: e.vel, shape: e.shape }))];
+    S.barIdx = 0;
+    P.groupLen = Math.max(1, Math.min(8, p.nbars));
+    P.tempo = p.tempo; P.sig = p.sig; S.stTempo = p.tempo;
+    closeModal();
+    flash(`${p.name} loaded — edit it, then Commit to shelve the new version as its own pattern.`);
+    renderAll();
+  });
+  r1.append(loadB);
+
+  const r2 = row();
+  const nin = document.createElement("input");
+  nin.type = "text"; nin.value = p.name; nin.style.width = "110px"; nin.maxLength = 16;
+  r2.append(nin, mkB("Rename", false, () => {
+    const v = String(nin.value).trim();
+    if (!v) { flash("Name cannot be empty."); return; }
+    p.name = v; patStore(); renderAll(); closeModal(); openShelfModal(pid);
+  }));
+
+  const r3 = row();
+  PALETTE.forEach(([nm, hex]) => {
+    const b = document.createElement("button");
+    b.className = "swatch" + (p.color === hex ? " sel" : "");
+    b.style.background = hex; b.title = nm;
+    b.addEventListener("click", () => { p.color = hex; patStore(); renderAll(); closeModal(); openShelfModal(pid); });
+    r3.append(b);
+  });
+
+  const r4 = row();
+  const parked = P && P.snapshot && P.snapshot.bars ? P.snapshot.bars : [];
+  const nInst = [...parked.flat(), ...S.bars.flat()].filter(e => e.type === "pattern" && e.pid === pid).length;
+  let armDel = false;
+  const delB = mkB("🗑 Delete pattern", false, () => {
+    if (!armDel) {
+      armDel = true;
+      delB.textContent = nInst ? `Delete + remove ${nInst} instance${nInst === 1 ? "" : "s"}?` : "Really delete?";
+      return;
+    }
+    patDeletePattern(pid);
+    closeModal();
+    flash(`${p.name} deleted${nInst ? ` (${nInst} instance${nInst === 1 ? "" : "s"} removed)` : ""}.`);
+    renderAll();
+  });
+  r4.append(delB, mkB("Close", false, closeModal));
+
+  body.append(info, r1, r2, r3, r4);
+  showModal(`${p.name} — shelf pattern`, body);
+}
+
 function patCommit(endHere) {
   const evts = S.bars[0].filter(e => e.type === "note" || e.type === "rest");
   let cap;
@@ -4024,7 +4149,7 @@ function patCommit(endHere) {
   }
   const n = S.patEdit.groups.length + 1;
   const pat = {
-    pid: Date.now(),
+    pid: newPid(),
     name: `P${n}`,
     color: PAT_DEFAULT_COLOR,
     tempo: S.patEdit.tempo, sig: S.patEdit.sig, nbars: S.patEdit.groupLen,
@@ -4124,6 +4249,102 @@ function openPatInsertModal(pid) {
 }
 /* per-box preview */
 let patPrev = null;
+const r3n = v => Math.round(v * 1000) / 1000;
+let pidSeq = 0;
+const newPid = () => Date.now() * 1000 + (pidSeq = (pidSeq + 1) % 1000);   // unique even within 1 ms
+function openPatInstanceModal(ev) {
+  const p = patById(ev.pid);
+  const P_ = p;
+  const body = document.createElement("div");
+  const mkB = (txt, on, fn, dis) => {
+    const b = document.createElement("button");
+    b.className = "btn small" + (on ? " active" : "");
+    b.textContent = txt; b.disabled = !!dis;
+    b.addEventListener("click", fn);
+    return b;
+  };
+  const lab = t => { const x = document.createElement("span");
+    x.style.cssText = "font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#666"; x.textContent = t; return x; };
+  const row = () => { const r = document.createElement("div"); r.className = "mline"; return r; };
+  const refresh = () => { renderAll(); closeModal(); openPatInstanceModal(ev); };
+
+  const r1 = row();
+  r1.append(lab("Loop"),
+    mkB("Once", !ev.pmode || ev.pmode === "once", () => { ev.pmode = "once"; refresh(); }),
+    mkB("Li ∞", ev.pmode === "li", () => { ev.pmode = ev.pmode === "li" ? "once" : "li"; refresh(); }),
+    mkB("Lo", ev.pmode === "lo", () => {
+      ev.pmode = ev.pmode === "lo" ? "once" : "lo";
+      if (ev.pmode === "lo" && !ev.pcount) ev.pcount = 1;
+      refresh();
+    }),
+    mkB("−", false, () => { ev.pcount = Math.max(1, (ev.pcount || 1) - 1); refresh(); }, ev.pmode !== "lo" || (ev.pcount || 1) <= 1));
+  const cnt = document.createElement("span");
+  cnt.style.cssText = "font-weight:700;min-width:26px;text-align:center";
+  cnt.textContent = `×${ev.pcount || 1}`;
+  r1.append(cnt,
+    mkB("+", false, () => { ev.pcount = Math.min(8, (ev.pcount || 1) + 1); refresh(); }, ev.pmode !== "lo" || (ev.pcount || 1) >= 8));
+
+  const r2 = row();
+  r2.append(lab("Preview"),
+    mkB("▶", patPrev && patPrev.evId === ev.id, () => patPreviewPlay(ev)),
+    mkB("⏸", S.paused && patPrev, () => {
+      if (!patPrev || !audioCtx) return;
+      if (!S.paused) { audioCtx.suspend(); S.paused = true; } else { audioCtx.resume(); S.paused = false; }
+      renderStatus();
+    }),
+    mkB("■", false, patPreviewStop));
+
+  const ms = [];
+  if (P_) P_.events.forEach(pe => { if (pe.type === "note") pe.midis.forEach(m => ms.push(m)); });
+  const lo = ms.length ? Math.min(...ms) : 60, hi = ms.length ? Math.max(...ms) : 60;
+  const trMin = MIDI_MIN - lo, trMax = MIDI_MAX - hi;
+  const setTr = d => {
+    const nt = Math.max(trMin, Math.min(trMax, (ev.tr || 0) + d));
+    if (nt === (ev.tr || 0)) { flash("That transposition would leave C2–F7."); return; }
+    undoStack.push({ kind: "patmove", id: ev.id, oldStart: ev.start, oldTr: ev.tr || 0 });
+    if (undoStack.length > 100) undoStack.shift();
+    ev.tr = nt;
+    refresh();
+  };
+  const r3 = row();
+  r3.append(lab("Transpose"),
+    mkB("−12", false, () => setTr(-12)), mkB("−1", false, () => setTr(-1)));
+  const trl = document.createElement("span");
+  trl.style.cssText = "font-weight:700;min-width:44px;text-align:center";
+  trl.textContent = `${(ev.tr || 0) > 0 ? "+" : ""}${ev.tr || 0} st`;
+  r3.append(trl, mkB("+1", false, () => setTr(1)), mkB("+12", false, () => setTr(12)));
+
+  const r4 = row();
+  r4.append(lab("Start"));
+  const sin = document.createElement("input");
+  sin.type = "text"; sin.inputMode = "decimal"; sin.value = fmt(ev.start); sin.style.width = "76px";
+  r4.append(sin, mkB("Apply", false, () => {
+    const v = parseFloat(String(sin.value).replace(",", "."));
+    if (isNaN(v) || v < 0) { flash("Start must be a number ≥ 0."); return; }
+    undoStack.push({ kind: "patmove", id: ev.id, oldStart: ev.start, oldTr: ev.tr || 0 });
+    if (undoStack.length > 100) undoStack.shift();
+    ev.start = r3n(v);
+    refresh();
+  }));
+
+  const r5 = row();
+  let armDel = false;
+  const delB = mkB("🗑 Remove instance", false, () => {
+    if (!armDel) { armDel = true; delB.textContent = "Really remove?"; return; }
+    const bi = S.bars.findIndex(b => b.includes(ev));
+    if (bi >= 0) {
+      S.bars[bi] = S.bars[bi].filter(e => e !== ev);
+      undoStack.push({ kind: "delgroup", items: [{ barIdx: bi, ev }] });
+      if (undoStack.length > 100) undoStack.shift();
+    }
+    closeModal(); flash("Instance removed (undoable)."); renderAll();
+  });
+  r5.append(delB, mkB("Close", false, closeModal));
+
+  body.append(r1, r2, r3, r4, r5);
+  showModal(`${P_ ? P_.name : "Pattern"} instance`, body);
+}
+
 function patPreviewStop() {
   if (!patPrev) return;
   clearInterval(patPrev.timer);
@@ -4298,39 +4519,59 @@ function renderPatPanel() {
   r1.append(mkB("Exit studio", false, exitPatternStudio));
   el.append(r1);
 
-  /* row 2: 16 slots */
+  /* row 2: the shelf — committed patterns stay visible as templates */
   const r2 = document.createElement("div"); r2.className = "row";
   const used = patUsedSlots();
-  let slot = 0;
+  r2.append(lab("Shelf"));
   P.groups.forEach(g => {
     const p = patById(g.pid);
+    if (!p) return;
+    const ci = P.combineSel.indexOf(g.pid);
     const box = document.createElement("div");
-    box.className = "patSlot committed" + (P.editSlot === g.pid ? " selSlot" : "");
-    box.style.borderColor = p ? p.color : PAT_DEFAULT_COLOR;
-    box.textContent = `${p ? p.name : "?"}${g.len > 1 ? ` (${slot + 1}–${slot + g.len})` : ""}`;
-    box.title = p ? `${p.name} · bars ${slot + 1}–${slot + g.len} · ${p.sig} ♩=${p.tempo} · ${fmt(p.span)} s — click to rename / recolor` : "";
+    box.className = "patSlot committed" + (ci >= 0 ? " selSlot" : "");
+    box.style.borderColor = p.color;
+    box.textContent = (ci >= 0 ? `${ci + 1}✓ ` : "") + `${p.name} · ${fmt(p.span)}s`;
+    box.title = P.combineOn
+      ? "tap to add / remove from the combine set (tap order = play order)"
+      : `${p.name} · ${g.len} bar${g.len === 1 ? "" : "s"} · ${p.sig} ♩=${p.tempo} — tap for controls`;
     const pid = g.pid;
-    box.addEventListener("click", () => { P.editSlot = P.editSlot === pid ? null : pid; renderAll(); });
-    r2.append(box);
-    slot += g.len;
-  });
-  for (let i = used; i < PAT_SLOTS; i++) {
-    const inGroup = i >= used && i < used + P.groupLen;
-    const box = document.createElement("div");
-    box.className = "patSlot" +
-      (inGroup ? " currentSlot" : i > used + P.groupLen - 1 ? " lockedSlot" : "") +
-      (S.patSel.has(i) ? " selSlot" : "");
-    box.textContent = i + 1;
-    box.title = inGroup ? "current pattern (editing)" : "locked until earlier patterns are committed — select to Combine";
     box.addEventListener("click", () => {
-      if (S.patSel.has(i)) S.patSel.delete(i); else S.patSel.add(i);
-      renderAll();
+      if (P.combineOn) {
+        const i = P.combineSel.indexOf(pid);
+        if (i >= 0) P.combineSel.splice(i, 1); else P.combineSel.push(pid);
+        renderAll();
+      } else openShelfModal(pid);
     });
     r2.append(box);
+  });
+  for (let i = used; i < PAT_SLOTS; i++) {
+    const inGroup = i < used + P.groupLen;
+    const box = document.createElement("div");
+    box.className = "patSlot" + (inGroup ? " currentSlot" : " lockedSlot");
+    box.textContent = i + 1;
+    box.title = inGroup ? "current pattern (editing)" : "empty slot";
+    r2.append(box);
   }
-  r2.append(mkB("Combine", false, patCombine, S.patSel.size < 2),
-            mkB("Uncombine", false, () => { S.patEdit.groupLen = 1; renderAll(); }, P.groupLen === 1));
   el.append(r2);
+
+  /* row 2b: bars-per-pattern stepper + combine committed patterns */
+  const r2b = document.createElement("div"); r2b.className = "row";
+  r2b.append(lab("Bars in this pattern"),
+    mkB("−", false, () => { P.groupLen = Math.max(1, P.groupLen - 1); renderAll(); }, P.groupLen <= 1));
+  const gl = document.createElement("span");
+  gl.style.cssText = "font-weight:700;min-width:18px;text-align:center";
+  gl.textContent = P.groupLen;
+  const glMax = Math.max(1, Math.min(8, PAT_SLOTS - used));
+  r2b.append(gl,
+    mkB("+", false, () => { P.groupLen = Math.min(glMax, P.groupLen + 1); renderAll(); }, P.groupLen >= glMax),
+    mkB("Select to combine", P.combineOn, () => {
+      P.combineOn = !P.combineOn;
+      if (!P.combineOn) P.combineSel = [];
+      renderAll();
+    }, P.groups.length < 2));
+  if (P.combineSel.length >= 2)
+    r2b.append(mkB(`Combine ${P.combineSel.length} →`, true, patMergeCommitted));
+  el.append(r2b);
 
   /* row 3: capacity + commit */
   const r3 = document.createElement("div"); r3.className = "row";
@@ -5533,7 +5774,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 27;
+const BUILD = 28;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
