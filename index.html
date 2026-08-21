@@ -1956,7 +1956,8 @@ function eventClicked(ev, clickX, clickY, toneMidi) {
   if (S.alignPending) { resolveAlign(ev); return; }
   if (S.dragMode || S.grabMode) return;                    // those tools use their own pointer events
   if (S.selMode) {
-    if (performance.now() < selClickSuppressUntil || gdrag) return;   // ignore the click tail of a drag
+    if (performance.now() < selClickSuppressUntil || gdrag) { ttrace(`sel: suppressed (gdrag=${!!gdrag})`); return; }
+    ttrace(`sel: toggle ev ${ev.id}`);   // ignore the click tail of a drag
     if (S.groupSel.has(ev.id)) S.groupSel.delete(ev.id); else S.groupSel.add(ev.id);
     renderAll();
     return;
@@ -2323,16 +2324,23 @@ window.addEventListener("error", e => reportErr(e.message + (e.lineno ? ` @${e.l
 window.addEventListener("unhandledrejection", e => reportErr("async: " + (e.reason && e.reason.message || e.reason)));
 
 let tapClaim = 0;   // an inner element claimed this tap; outer (staff) handlers stand down
+const tapTrace = [];
+function ttrace(msg) {
+  tapTrace.push(`${(performance.now() / 1000).toFixed(1)}s ${msg}`);
+  if (tapTrace.length > 8) tapTrace.shift();
+}
 function attachTap(el, fn, isRoot) {
   let sx = 0, sy = 0, t0 = 0, pid = -1;
   el.addEventListener("pointerdown", e => {
     pid = e.pointerId; sx = e.clientX; sy = e.clientY; t0 = performance.now();
   }, { passive: true });
   el.addEventListener("pointerup", e => {
-    if (e.pointerId !== pid) return;
+    if (e.pointerId !== pid) { ttrace(`pu ${isRoot ? "staff" : "el"}: id-mismatch`); return; }
     pid = -1;
-    if (performance.now() - t0 > 600) return;
-    if (Math.hypot(e.clientX - sx, e.clientY - sy) > 10) return;
+    const dt = performance.now() - t0, dist = Math.hypot(e.clientX - sx, e.clientY - sy);
+    if (dt > 900) { ttrace(`pu ${isRoot ? "staff" : "el"}: too slow ${Math.round(dt)}ms`); return; }
+    if (dist > 10) { ttrace(`pu ${isRoot ? "staff" : "el"}: moved ${Math.round(dist)}px`); return; }
+    ttrace(`pu ${isRoot ? "staff" : "el"}: TAP ${Math.round(dt)}ms`);
     /* IMPORTANT: no stopPropagation here — window-level pointerup handlers
        must always run (they end grabs/drags). Dedup is done by claiming. */
     if (isRoot && performance.now() - tapClaim < 90) return;
@@ -2344,6 +2352,7 @@ function attachTap(el, fn, isRoot) {
     if (el.__tapTs && performance.now() - el.__tapTs < 400) return;
     if (isRoot && performance.now() - tapClaim < 400) return;
     if (!isRoot) tapClaim = performance.now();
+    ttrace(`click ${isRoot ? "staff" : "el"}: fired`);
     fn(e);
   });
 }
@@ -4029,10 +4038,7 @@ function patCommit(endHere) {
   patStore();
   S.patEdit.groups.push({ len: S.patEdit.groupLen, pid: pat.pid });
   patSetStore(S.patEdit.groups);
-  S.patEdit.groupLen = 1;
-  S.bars = [[]]; S.barIdx = 0;
-  undoStack.length = 0;
-  flash(`${pat.name} committed (${pat.nbars} bar${pat.nbars === 1 ? "" : "s"}, ${fmt(pat.span)} s) — now editing the next pattern.`);
+  flash(`${pat.name} committed (${pat.nbars} bar${pat.nbars === 1 ? "" : "s"}, ${fmt(pat.span)} s) — content kept. Edit and commit again, or Clear all (File menu) for a fresh staff.`);
   renderAll();
 }
 /* instance duration: once = span; Lo ×N = N plays + N−1 silent cycles; Li shows one cycle */
@@ -5458,7 +5464,8 @@ $("mDiag").addEventListener("click", () => {
     `bars: ${S.bars.length} (bar ${S.barIdx + 1}, ${bar().length} events)\n` +
     `patterns: ${S.patterns.length} committed · studio ${S.patEdit ? "OPEN" : "closed"}\n` +
     `playing: ${S.playing} paused: ${S.paused}\n` +
-    `recent errors: ${errLog.length ? "\n  " + errLog.join("\n  ") : "none"}`;
+    `recent errors: ${errLog.length ? "\n  " + errLog.join("\n  ") : "none"}\n` +
+    `tap trace: ${tapTrace.length ? "\n  " + tapTrace.join("\n  ") : "none yet"}`;
   const line = document.createElement("div");
   line.className = "mline";
   const rst = document.createElement("button");
@@ -5525,7 +5532,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 25;
+const BUILD = 26;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
