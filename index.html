@@ -118,7 +118,7 @@
 
   .staffFrame { overflow-x: auto; border: 1px solid #eee; border-radius: 6px; margin-bottom: 10px;
     -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
-  .staffFrame.studio { border: 2.5px dashed #1565c0; }
+  .staffFrame.studio { border: 2.5px dashed #1565c0; padding: 7px 9px; }
   @media (max-width: 980px) {
     .rightPane { padding: 0 22px; }        /* thumb gutters: page-scroll without touching the staff */
     .staffFrame { margin-left: 2px; margin-right: 2px; }
@@ -2295,7 +2295,8 @@ function applyRhythm(idx) {
    pixels (scroll heuristics). attachTap fires on pointerup for stationary
    short presses and then swallows the duplicate click. Real drags (>10 px)
    fall through untouched, so grab/resize/scroll are unaffected. */
-function attachTap(el, fn) {
+let tapClaim = 0;   // an inner element claimed this tap; outer (staff) handlers stand down
+function attachTap(el, fn, isRoot) {
   let sx = 0, sy = 0, t0 = 0, pid = -1;
   el.addEventListener("pointerdown", e => {
     pid = e.pointerId; sx = e.clientX; sy = e.clientY; t0 = performance.now();
@@ -2305,11 +2306,17 @@ function attachTap(el, fn) {
     pid = -1;
     if (performance.now() - t0 > 600) return;
     if (Math.hypot(e.clientX - sx, e.clientY - sy) > 10) return;
+    /* IMPORTANT: no stopPropagation here — window-level pointerup handlers
+       must always run (they end grabs/drags). Dedup is done by claiming. */
+    if (isRoot && performance.now() - tapClaim < 90) return;
+    if (!isRoot) tapClaim = performance.now();
     el.__tapTs = performance.now();
     fn(e);
   });
   el.addEventListener("click", e => {
-    if (el.__tapTs && performance.now() - el.__tapTs < 400) { e.stopPropagation(); return; }
+    if (el.__tapTs && performance.now() - el.__tapTs < 400) return;
+    if (isRoot && performance.now() - tapClaim < 400) return;
+    if (!isRoot) tapClaim = performance.now();
     fn(e);
   });
 }
@@ -3198,7 +3205,6 @@ function renderStaff() {
       /* "click" (not pointerdown): browsers suppress click after a scroll/drag
          gesture, so swiping the staff can't select or stack tones by accident */
       attachTap(shape, e => {
-        e.stopPropagation();
         const rect = svg.getBoundingClientRect();
         eventClicked(ev, e.clientX - rect.left, e.clientY - rect.top, toneMidi);
       });
@@ -3332,7 +3338,7 @@ function renderStaff() {
     const box = svgEl("rect", { x: gx + 1, y: PAD_T + 6, width: gw - 2, height: STAFF_H - PAD_T - PAD_B - 12,
       fill: "rgba(0,0,0,0.03)", stroke: "#999", "stroke-width": 1.2, "stroke-dasharray": "3 4", rx: 4 });
     box.style.cursor = "copy";
-    attachTap(box, e => { e.stopPropagation(); gapRestAt((g.s + g.e) / 2); });
+    attachTap(box, () => gapRestAt((g.s + g.e) / 2));
     svg.append(box);
     svg.append(svgEl("text", { x: gx + gw / 2, y: PAD_T + 20, "text-anchor": "middle",
       "font-size": 9.5, fill: "#999", "pointer-events": "none" }, `⌷ ${fmt(g.e - g.s)} s`));
@@ -3351,7 +3357,6 @@ function renderStaff() {
       opacity: ev.muted ? 0.35 : 1, "data-ev": ev.id });
     box.style.cursor = S.grabMode ? "move" : "pointer";
     attachTap(box, e => {
-      e.stopPropagation();
       const rect = svg.getBoundingClientRect();
       eventClicked(ev, e.clientX - rect.left, e.clientY - rect.top, null);
     });
@@ -5144,7 +5149,12 @@ $("staff").addEventListener("pointermove", e => {
   if (staffPan.active) staffPan.frame.scrollLeft = staffPan.sl - dx;
 });
 window.addEventListener("pointerup", () => { staffPan = null; });
-window.addEventListener("pointercancel", () => { staffPan = null; });
+window.addEventListener("pointercancel", () => {
+  staffPan = null;
+  if (gdrag) { gdrag = null; renderAll(); }
+  if (grab) { grab = null; renderAll(); }
+  if (pgrab) { pgrab = null; renderAll(); }
+});
 
 attachTap($("staff"), e => {
   if (e.target && e.target.dataset && e.target.dataset.ev !== undefined) return;  // shapes handle their own taps
@@ -5337,9 +5347,15 @@ function renderMenus() {
     l.textContent = `${p.name} · ${p.nbars} bar${p.nbars === 1 ? "" : "s"} · ${fmt(p.span)} s`;
     const h = document.createElement("span");
     h.className = "hintk";
-    h.textContent = "insert…";
+    h.textContent = "tap: add to this bar";
     b.append(sw, l, h);
-    b.addEventListener("click", () => { closeMenus(); openPatInsertModal(p.pid); });
+    b.addEventListener("click", () => {
+      closeMenus();
+      if (S.patEdit) { openPatInsertModal(p.pid); return; }
+      patInsertIntoBars(S.bars, p.pid, S.barIdx, 0);
+      flash(`${p.name} added to bar ${S.barIdx + 1} at the cursor — Grab moves it; use "Insert pattern…" for a bar range.`);
+      renderAll();
+    });
     dp.append(b);
   });
   /* dynamic labels in static menus */
@@ -5428,7 +5444,7 @@ document.addEventListener("click", e => {
   S.selectedId = null;
   S.selectedMidi = null;
   renderAll();
-});
+}, true);
 
 /* re-fit the staff when the window (or pane) resizes */
 let resizeT = null;
@@ -5444,7 +5460,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 23;
+const BUILD = 24;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
