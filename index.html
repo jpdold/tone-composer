@@ -296,6 +296,7 @@
       <div class="dropdown">
         <button class="mitem" id="mInstructions">Instructions</button>
         <button class="mitem" id="mAbout">About Sine Tone Composer</button>
+        <button class="mitem" id="mDiag">Diagnostics</button>
       </div>
     </div>
     <span id="transportMini">
@@ -2295,6 +2296,32 @@ function applyRhythm(idx) {
    pixels (scroll heuristics). attachTap fires on pointerup for stationary
    short presses and then swallows the duplicate click. Real drags (>10 px)
    fall through untouched, so grab/resize/scroll are unaffected. */
+/* runtime errors surface ON the page — essential for phone debugging */
+let staffPan = null;
+const errLog = [];
+function reportErr(msg) {
+  errLog.push(String(msg).slice(0, 300));
+  if (errLog.length > 5) errLog.shift();
+  let b = document.getElementById("errBanner");
+  if (!b) {
+    b = document.createElement("div");
+    b.id = "errBanner";
+    b.style.cssText = "position:fixed;left:8px;right:8px;bottom:8px;z-index:999;background:#b71c1c;" +
+      "color:#fff;font-size:12px;padding:8px 34px 8px 10px;border-radius:6px;word-break:break-word";
+    const x = document.createElement("button");
+    x.textContent = "✕";
+    x.style.cssText = "position:absolute;right:6px;top:6px;background:none;border:none;color:#fff;font-size:14px";
+    x.addEventListener("click", () => b.remove());
+    b.append(x);
+    document.body.append(b);
+  }
+  const line = document.createElement("div");
+  line.textContent = "⚠ " + errLog[errLog.length - 1];
+  b.append(line);
+}
+window.addEventListener("error", e => reportErr(e.message + (e.lineno ? ` @${e.lineno}` : "")));
+window.addEventListener("unhandledrejection", e => reportErr("async: " + (e.reason && e.reason.message || e.reason)));
+
 let tapClaim = 0;   // an inner element claimed this tap; outer (staff) handlers stand down
 function attachTap(el, fn, isRoot) {
   let sx = 0, sy = 0, t0 = 0, pid = -1;
@@ -5023,6 +5050,9 @@ $("undoBtn").addEventListener("click", undo);
 const MODES = ["restMode","chordMode","timeAdjust","deleteMode","dragMode","grabMode","penMode","mergeMode","loopMode","colorMode","quantMode","selMode","stencilMode","gapRestMode"];
 function armMode(prop, keep) {
   keep = keep || [];
+  /* defensive: no stale drag state can ever survive a tool change */
+  drag = null; grab = null; gdrag = null; pgrab = null; staffPan = null;
+  selClickSuppressUntil = 0;
   const on = !S[prop];
   MODES.forEach(k => { if (k !== prop && !keep.includes(k)) S[k] = false; });
   S[prop] = on;
@@ -5135,7 +5165,6 @@ restPad.addEventListener("contextmenu", e => e.preventDefault());
    implemented directly so it cannot depend on per-browser touch heuristics.
    Vertical swipes stay native (page scroll); drag tools take precedence;
    moves under 10 px remain taps. */
-let staffPan = null;
 $("staff").addEventListener("pointerdown", e => {
   if (S.dragMode || S.grabMode || S.selMode || drag || grab || gdrag || pgrab) return;
   const frame = document.querySelector(".staffFrame");
@@ -5415,6 +5444,42 @@ $("mInstructions").addEventListener("click", () => {
   acc.open = true;
   acc.scrollIntoView({ behavior: "smooth" });
 });
+$("mDiag").addEventListener("click", () => {
+  const body = document.createElement("div");
+  body.className = "mrow";
+  const pre = document.createElement("div");
+  pre.style.cssText = "font-size:12px;font-family:ui-monospace,monospace;white-space:pre-wrap;line-height:1.5";
+  const armed = MODES.filter(k => S[k]).join(", ") || "none";
+  pre.textContent =
+    `build: ${BUILD}\n` +
+    `armed tool: ${armed}\n` +
+    `drag states: drag=${!!drag} grab=${!!grab} gdrag=${!!gdrag} pgrab=${!!pgrab}\n` +
+    `selection: group=${S.groupSel.size} stencil=${S.stencilSel.size} single=${S.selectedId != null}\n` +
+    `bars: ${S.bars.length} (bar ${S.barIdx + 1}, ${bar().length} events)\n` +
+    `patterns: ${S.patterns.length} committed · studio ${S.patEdit ? "OPEN" : "closed"}\n` +
+    `playing: ${S.playing} paused: ${S.paused}\n` +
+    `recent errors: ${errLog.length ? "\n  " + errLog.join("\n  ") : "none"}`;
+  const line = document.createElement("div");
+  line.className = "mline";
+  const rst = document.createElement("button");
+  rst.className = "btn";
+  rst.textContent = "Reset tool state";
+  rst.addEventListener("click", () => {
+    drag = null; grab = null; gdrag = null; pgrab = null; staffPan = null;
+    selClickSuppressUntil = 0;
+    MODES.forEach(k => S[k] = false);
+    closeModal();
+    flash("Tool state reset.");
+    renderAll();
+  });
+  const ok = document.createElement("button");
+  ok.className = "btn active";
+  ok.textContent = "Close";
+  ok.addEventListener("click", closeModal);
+  line.append(rst, ok);
+  body.append(pre, line);
+  showModal("Diagnostics", body);
+});
 $("mAbout").addEventListener("click", () => {
   const body = document.createElement("div");
   body.className = "mrow";
@@ -5460,7 +5525,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 24;
+const BUILD = 25;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
