@@ -119,6 +119,26 @@
   .staffFrame { overflow-x: auto; border: 1px solid #eee; border-radius: 6px; margin-bottom: 10px;
     -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
   .staffFrame.studio { border: 2.5px dashed #1565c0; padding: 7px 9px; }
+  #bankStrip { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 2px 2px 10px; }
+  .bankLab { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #666; margin-top: 16px; }
+  .bankCard { border: 1.5px solid #000; border-radius: 6px; padding: 4px; display: flex; flex-direction: column; gap: 3px; align-items: center; }
+  .bankBox { width: 46px; height: 46px; border-radius: 5px; display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; cursor: pointer; border: 1px solid rgba(0,0,0,0.25); }
+  .bankBars { font-size: 9px; color: #555; max-width: 106px; text-align: center; line-height: 1.2; }
+  .bankBtns { display: flex; flex-wrap: wrap; gap: 2px; justify-content: center; max-width: 106px; }
+  .bankBtns button { min-width: 23px; height: 20px; font-size: 9.5px; padding: 0 3px; }
+  .bankAdd { width: 46px; height: 46px; border-radius: 6px; border: 1.5px dashed #999; background: none;
+    font-size: 20px; cursor: pointer; margin-top: 10px; }
+  #gridWrap { display: grid; gap: 8px; margin: 4px 2px 12px; }
+  .gridCell { border: 1.5px solid #bbb; border-radius: 6px; padding: 4px 6px 3px; cursor: pointer; background: #fff; }
+  .gridCell.selCell { border-color: #000; border-width: 2.5px; }
+  .gridCell.playCell { outline: 2.5px solid #1b5e20; outline-offset: -1px; }
+  .gridHead { display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; }
+  .gridHead .dots { display: flex; gap: 2px; }
+  .gridHead .dot { width: 8px; height: 8px; border-radius: 50%; border: 1px solid rgba(0,0,0,0.25); }
+  .gridEmpty { color: #999; font-size: 10px; font-style: italic; }
+  body.theme-gy .gridCell { background: #6a6d71; border-color: #3d3f42; }
+  body.theme-gy .bankBars { color: #d9d9d9; }
   @media (max-width: 980px) {
     .rightPane { padding: 0 22px; }        /* thumb gutters: page-scroll without touching the staff */
     .staffFrame { margin-left: 2px; margin-right: 2px; }
@@ -416,6 +436,8 @@
         <button id="scrollLBtn" class="btn small" title="Scroll the staff left">⟵</button>
         <button id="scrollRBtn" class="btn small" title="Scroll the staff right">⟶</button>
       </div>
+      <div id="bankStrip" style="display:none"></div>
+      <div id="gridWrap" style="display:none"></div>
       <div class="staffFrame"><svg id="staff" style="display:block;background:#fff"></svg></div>
     </div>
     <div class="keysCol" id="keysCol">
@@ -597,6 +619,9 @@ const S = {
   audioOn: false, audioGate: "medium",   // mic pitch-input; gate = sensitivity
   theme: (typeof localStorage !== "undefined" && localStorage.getItem("toneComposerV2.theme")) || "classic",
   showKeys: (typeof localStorage !== "undefined" && localStorage.getItem("toneComposerV2.showKeys") === "1"),
+  gridView: (() => { try { const v = parseInt(localStorage.getItem("toneComposerV2.gridView"), 10);
+    return [1, 4, 8, 12, 16].includes(v) ? v : 1; } catch (e) { return 1; } })(),
+  bank: [],                        // pattern bank: {pid, bars:"all"|[idx], pmode, pcount, muted}
   showChips: (typeof localStorage !== "undefined" && localStorage.getItem("toneComposerV2.showChips") === "1"),
   spacing: (typeof localStorage !== "undefined" && SPACINGS_VALID(localStorage.getItem("toneComposerV2.spacing"))) || "default",
   voice: "sine",                   // "sine" | "piano" — per-composition tone generator
@@ -1296,10 +1321,53 @@ function scheduleTone(ctx, t0, midi, start, durIn, vel, shape) {
   if (playNodes.length > 900) playNodes.splice(0, 450);   // long continuous loops: shed finished nodes
 }
 let playSched = null;
+function bankAppliesTo(be, bi) {
+  return be.bars === "all" || (Array.isArray(be.bars) && be.bars.includes(bi));
+}
+function bankFloor(bi) {
+  /* an assigned bank pattern gives its bar a minimum playable length —
+     otherwise an empty bar used as a pure pattern slot would last 1 ms */
+  if (S.patEdit || !S.bank || !S.bank.length) return 0;
+  let m = 0;
+  S.bank.forEach(be => {
+    if (be.muted || !bankAppliesTo(be, bi)) return;
+    const p = patById(be.pid);
+    if (!p || p.span <= 0) return;
+    const d = be.pmode === "lo" ? p.span * (2 * Math.max(1, be.pcount || 1) - 1) : p.span;
+    if (d > m) m = d;
+  });
+  return m;
+}
+function scheduleBankFor(ctx, t0, bi, ws, we, base) {
+  if (S.patEdit || !S.bank || !S.bank.length) return;
+  const L = Math.max(barLen(S.bars[bi]), bankFloor(bi), 0.001);
+  S.bank.forEach(be => {
+    if (be.muted || !bankAppliesTo(be, bi)) return;
+    const p = patById(be.pid);
+    if (!p || !p.events.length || p.span <= 0) return;
+    const step = be.pmode === "lo" ? p.span * 2 : p.span;
+    const cycles = be.pmode === "li" ? Math.max(1, Math.ceil(L / p.span))
+                 : be.pmode === "lo" ? Math.max(1, be.pcount || 1) : 1;
+    for (let k = 0; k < cycles; k++) {
+      const c0 = k * step;
+      if (be.pmode === "li" && c0 >= L) break;
+      p.events.forEach(pe => {
+        if (pe.type !== "note") return;
+        const t = c0 + pe.start;
+        if (t < ws || t >= we) return;
+        if (be.pmode === "li" && t >= L) return;
+        pe.midis.forEach(m => {
+          if (m >= MIDI_MIN && m <= MIDI_MAX)
+            scheduleTone(ctx, t0, m, base + (t - ws), shapeDur(pe), pe.vel, pe.shape);
+        });
+      });
+    }
+  });
+}
 function buildSegments(barIndices) {
   const segs = [];
   barIndices.forEach(bi => {
-    const L = Math.max(barLen(S.bars[bi]), 0.001);
+    const L = Math.max(barLen(S.bars[bi]), bankFloor(bi), 0.001);
     const lp = S.loop && S.loop.barIdx === bi && S.loop.barIdx < S.bars.length ? S.loop : null;
     if (lp) {
       const a = Math.max(0, Math.min(lp.startT, L));
@@ -1312,6 +1380,7 @@ function buildSegments(barIndices) {
   return segs;
 }
 function scheduleWindow(ctx, t0, bi, ws, we, base) {
+  scheduleBankFor(ctx, t0, bi, ws, we, base);
   S.bars[bi].forEach(ev => {
     if (ev.start >= ws && ev.start < we && !ev.muted) {
       const at = base + (ev.start - ws);
@@ -1346,7 +1415,7 @@ function playSeq(barIndices) {
   if (S.playing) { stopPlayback(); return; }
   stopLatch();
   midiPanic();
-  if (!barIndices.some(bi => S.bars[bi].length)) { flash("Nothing to play yet."); return; }
+  if (!barIndices.some(bi => S.bars[bi].length || bankFloor(bi) > 0)) { flash("Nothing to play yet."); return; }
   const segs = buildSegments(barIndices);
   const ctx = ensureCtx();
   const begin = () => {
@@ -1709,7 +1778,9 @@ function saveComp() {
   const existed = !!saved[name];
   saved[name] = { version: 2.4, bars: S.bars, loop: S.loop, colorRules: S.colorRules,
     notation: S.notation, tonal: S.tonal, voice: S.voice,
-    patterns: S.patterns.filter(p => S.bars.flat().some(e => e.type === "pattern" && e.pid === p.pid)),
+    bank: S.bank,
+    patterns: S.patterns.filter(p => S.bars.flat().some(e => e.type === "pattern" && e.pid === p.pid) ||
+                                     S.bank.some(b => b.pid === p.pid)),
     savedAt: Date.now() };
   flash(writeSaved(saved) ? (existed ? `Updated "${name}".` : `Saved "${name}".`)
                           : "Save failed — storage unavailable.");
@@ -1776,6 +1847,14 @@ function restoreExtras(d) {
     S.loop = { barIdx: d.loop.barIdx, startT: r3(d.loop.startT), endT: r3(d.loop.endT),
       mode: d.loop.mode, count: d.loop.mode === "count" ? Math.max(1, parseInt(d.loop.count, 10) || 1) : 0 };
   }
+  S.bank = Array.isArray(d.bank)
+    ? d.bank.filter(b => b && (b.bars === "all" || Array.isArray(b.bars)))
+        .map(b => ({ pid: b.pid,
+          bars: b.bars === "all" ? "all" : b.bars.filter(x => Number.isInteger(x) && x >= 0),
+          pmode: ["li", "lo"].includes(b.pmode) ? b.pmode : "once",
+          pcount: Math.max(1, parseInt(b.pcount, 10) || 1),
+          muted: !!b.muted }))
+    : [];
   S.colorRules = Array.isArray(d.colorRules)
     ? d.colorRules.filter(r => r && Number.isInteger(r.lo) && Number.isInteger(r.hi) &&
         r.lo >= MIDI_MIN && r.hi <= MIDI_MAX && r.lo <= r.hi &&
@@ -1903,7 +1982,9 @@ function openPasteImport() {
 function exportComp() {
   const blob = new Blob([JSON.stringify({ version: 2.4, bars: S.bars, loop: S.loop, colorRules: S.colorRules,
     notation: S.notation, tonal: S.tonal, voice: S.voice,
-    patterns: S.patterns.filter(p => S.bars.flat().some(e => e.type === "pattern" && e.pid === p.pid)) }, null, 2)],
+    bank: S.bank,
+    patterns: S.patterns.filter(p => S.bars.flat().some(e => e.type === "pattern" && e.pid === p.pid) ||
+                                     S.bank.some(b => b.pid === p.pid)) }, null, 2)],
     { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -4039,6 +4120,7 @@ function patDeletePattern(pid) {
       P.snapshot.bars.forEach((b, i) => P.snapshot.bars[i] = b.filter(e => !(e.type === "pattern" && e.pid === pid)));
   }
   S.bars.forEach((b, i) => S.bars[i] = b.filter(e => !(e.type === "pattern" && e.pid === pid)));
+  S.bank = S.bank.filter(b => b.pid !== pid);
 }
 
 function openShelfModal(pid) {
@@ -4472,6 +4554,237 @@ function renderBarGrid() {
   $("barSelBtn").classList.toggle("active", S.barSelMode);
   $("barOps").style.display = S.barSelMode && S.barSel.size ? "inline-flex" : "none";
   $("barDelSel").textContent = `✕ Delete${S.barSel.size ? " (" + S.barSel.size + ")" : ""}`;
+}
+
+function bankBarsLabel(be) {
+  if (be.bars === "all") return "all bars";
+  if (!be.bars.length) return "no bars!";
+  const a = [...be.bars].sort((x, y) => x - y).map(x => x + 1);
+  const parts = [];
+  let s0 = a[0], prev = a[0];
+  for (let i = 1; i <= a.length; i++) {
+    if (i < a.length && a[i] === prev + 1) { prev = a[i]; continue; }
+    parts.push(s0 === prev ? `${s0}` : `${s0}–${prev}`);
+    if (i < a.length) { s0 = a[i]; prev = a[i]; }
+  }
+  return "bars " + parts.join(",");
+}
+function renderBank() {
+  const el = $("bankStrip");
+  const show = !S.patEdit && (S.bank.length > 0 || S.gridView > 1);
+  el.style.display = show ? "" : "none";
+  el.replaceChildren();
+  if (!show) return;
+  const lab = document.createElement("span");
+  lab.className = "bankLab"; lab.textContent = "Bank";
+  el.append(lab);
+  S.bank.forEach((be, i) => {
+    const p = patById(be.pid);
+    const card = document.createElement("div");
+    card.className = "bankCard";
+    const box = document.createElement("div");
+    box.className = "bankBox";
+    const col = p ? p.color : "#888";
+    box.style.background = col;
+    box.style.color = isLight(col) ? "#000" : "#fff";
+    box.style.opacity = be.muted ? 0.4 : 1;
+    box.textContent = p ? p.name : "?";
+    box.title = `${p ? p.name : "missing pattern"} — tap to assign bars`;
+    box.addEventListener("click", () => openBankAssign(i));
+    const barsL = document.createElement("div");
+    barsL.className = "bankBars";
+    barsL.textContent = bankBarsLabel(be) + (be.pmode === "li" ? " · Li∞" : be.pmode === "lo" ? ` · Lo×${be.pcount}` : "");
+    const btns = document.createElement("div");
+    btns.className = "bankBtns";
+    const bb = (txt, title, fn, on) => {
+      const b = document.createElement("button");
+      b.className = "btn small" + (on ? " active" : "");
+      b.textContent = txt; b.title = title;
+      b.addEventListener("click", fn);
+      btns.append(b);
+    };
+    bb("▶", "Preview", () => patPreviewPlay({ type: "pattern", id: "bank" + i, pid: be.pid, start: 0, pmode: be.pmode, pcount: be.pcount, tr: 0 }));
+    bb("⏸", "Pause / resume preview", () => {
+      if (!patPrev || !audioCtx) return;
+      if (!S.paused) { audioCtx.suspend(); S.paused = true; } else { audioCtx.resume(); S.paused = false; }
+      renderStatus();
+    }, S.paused && patPrev);
+    bb("■", "Stop preview", patPreviewStop);
+    bb("Li", "Loop to fill each assigned bar", () => { be.pmode = be.pmode === "li" ? "once" : "li"; renderAll(); }, be.pmode === "li");
+    bb("Lo", "Play, rest one cycle, repeat", () => {
+      be.pmode = be.pmode === "lo" ? "once" : "lo"; renderAll();
+    }, be.pmode === "lo");
+    bb(`×${be.pcount}`, "Lo repeat count (cycles 1–8)", () => { be.pcount = (be.pcount % 8) + 1; renderAll(); });
+    bb("🔇", "Mute in playback", () => { be.muted = !be.muted; renderAll(); }, be.muted);
+    bb("✕", "Remove from bank", () => { S.bank.splice(i, 1); renderAll(); });
+    card.append(box, barsL, btns);
+    el.append(card);
+  });
+  const add = document.createElement("button");
+  add.className = "bankAdd";
+  add.textContent = "＋";
+  add.title = "Add a pattern from the library to the bank";
+  add.addEventListener("click", openBankAdd);
+  el.append(add);
+}
+function openBankAdd() {
+  if (!S.patterns.length) { flash("No committed patterns yet — build one in the Pattern Studio."); return; }
+  const body = document.createElement("div");
+  const line = document.createElement("div");
+  line.className = "mline";
+  const sel = document.createElement("select");
+  sel.className = "pitchSel";
+  S.patterns.forEach(p => {
+    const o = document.createElement("option");
+    o.value = p.pid;
+    o.textContent = `${p.name} · ${fmt(p.span)} s · ${p.nbars} bar${p.nbars === 1 ? "" : "s"}`;
+    sel.append(o);
+  });
+  const go = document.createElement("button");
+  go.className = "btn active"; go.textContent = "Add to bank";
+  go.addEventListener("click", () => {
+    S.bank.push({ pid: Number(sel.value), bars: "all", pmode: "once", pcount: 1, muted: false });
+    closeModal();
+    flash("Added — it applies to all bars until you assign specific ones (tap its colored box).");
+    renderAll();
+  });
+  line.append(sel, go);
+  body.append(line);
+  showModal("Add pattern to bank", body);
+}
+function openBankAssign(i) {
+  const be = S.bank[i];
+  if (!be) return;
+  const p = patById(be.pid);
+  const body = document.createElement("div");
+  const mkB = (txt, on, fn, dis) => {
+    const b = document.createElement("button");
+    b.className = "btn small" + (on ? " active" : "");
+    b.textContent = txt; b.disabled = !!dis;
+    b.addEventListener("click", fn);
+    return b;
+  };
+  const reopen = () => { renderAll(); closeModal(); openBankAssign(i); };
+  const r1 = document.createElement("div"); r1.className = "mline";
+  r1.append(mkB("All bars", be.bars === "all", () => { be.bars = "all"; reopen(); }),
+            mkB("Selected bars", be.bars !== "all", () => { if (be.bars === "all") be.bars = []; reopen(); }));
+  const r2 = document.createElement("div"); r2.className = "mline";
+  const nBars = Math.max(S.bars.length, S.gridView);
+  for (let b2 = 0; b2 < nBars; b2++) {
+    const on = Array.isArray(be.bars) && be.bars.includes(b2);
+    r2.append(mkB(String(b2 + 1), on, () => {
+      if (be.bars === "all") be.bars = [];
+      const j = be.bars.indexOf(b2);
+      if (j >= 0) be.bars.splice(j, 1); else be.bars.push(b2);
+      reopen();
+    }));
+  }
+  const r3 = document.createElement("div"); r3.className = "mline";
+  const fIn = document.createElement("input"); fIn.type = "text"; fIn.inputMode = "numeric"; fIn.placeholder = "from"; fIn.style.width = "52px";
+  const tIn = document.createElement("input"); tIn.type = "text"; tIn.inputMode = "numeric"; tIn.placeholder = "to"; tIn.style.width = "52px";
+  r3.append(fIn, tIn, mkB("Set range", false, () => {
+    const a = parseInt(fIn.value, 10), b2 = parseInt(tIn.value, 10);
+    if (isNaN(a) || isNaN(b2) || a < 1 || b2 < a || b2 > nBars) { flash(`Range must be within 1–${nBars}.`); return; }
+    be.bars = [];
+    for (let k = a - 1; k <= b2 - 1; k++) be.bars.push(k);
+    reopen();
+  }), mkB("Done", true, closeModal));
+  body.append(r1, r2, r3);
+  showModal(`${p ? p.name : "Pattern"} — assign bars`, body);
+}
+
+/* ── multi-bar grid view ── */
+function miniBarSvg(bi) {
+  const b = S.bars[bi] || [];
+  const span = Math.max(barLen(b), bankFloor(bi), 0.5);
+  const W = 220, H = 88, PL = 3, PR = 3, PT = 7, PB = 5;
+  const MX = t => PL + (t / span) * (W - PL - PR);
+  const MY = m => PT + (MIDI_MAX - m) / (MIDI_MAX - MIDI_MIN) * (H - PT - PB);
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", height: "auto", preserveAspectRatio: "none" });
+  svg.style.display = "block";
+  b.forEach(ev => {
+    if (ev.type === "note") {
+      ev.midis.forEach(m => svg.append(svgEl("rect", {
+        x: MX(ev.start), y: MY(m) - 1.5,
+        width: Math.max((ev.dur / span) * (W - PL - PR), 2), height: 3,
+        rx: 1, fill: ev.color || "#333", opacity: ev.muted ? 0.3 : 0.95 })));
+    } else if (ev.type === "rest") {
+      svg.append(svgEl("line", { x1: MX(ev.start), x2: MX(ev.start + ev.dur), y1: H - 4, y2: H - 4,
+        stroke: "#999", "stroke-width": 2, "stroke-dasharray": "2 3" }));
+    } else if (ev.type === "bass") {
+      svg.append(svgEl("rect", { x: MX(ev.start), y: MY(ev.midi) - 1.5,
+        width: Math.max((ev.dur / span) * (W - PL - PR), 2), height: 3, fill: "#555" }));
+    } else if (ev.type === "pattern") {
+      const p = patById(ev.pid);
+      const col = p ? p.color : "#888";
+      const wpx = Math.max((patInstSpan(ev) / span) * (W - PL - PR), 6);
+      svg.append(svgEl("rect", { x: MX(ev.start), y: PT, width: wpx, height: H - PT - PB,
+        fill: col, opacity: 0.2 }));
+      svg.append(svgEl("text", { x: MX(ev.start) + 2, y: PT + 8, "font-size": 7, "font-weight": 700, fill: col },
+        p ? p.name : "?"));
+    }
+  });
+  return svg;
+}
+function renderGridView() {
+  const wrap = $("gridWrap");
+  const on = S.gridView > 1 && !S.patEdit;
+  const frame = document.querySelector(".staffFrame");
+  if (frame) frame.style.display = on ? "none" : "";
+  wrap.style.display = on ? "grid" : "none";
+  wrap.replaceChildren();
+  if (!on) return;
+  const cols = S.gridView === 4 ? 2 : 4;
+  wrap.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  for (let i = 0; i < S.gridView; i++) {
+    const cell = document.createElement("div");
+    cell.className = "gridCell" + (i === S.barIdx ? " selCell" : "") +
+      (S.playing && S.playBarIdx === i ? " playCell" : "");
+    const head = document.createElement("div");
+    head.className = "gridHead";
+    const t = document.createElement("span");
+    t.textContent = `Bar ${i + 1}`;
+    head.append(t);
+    const dots = document.createElement("span");
+    dots.className = "dots";
+    S.bank.forEach(be => {
+      if (be.muted || !bankAppliesTo(be, i)) return;
+      const p = patById(be.pid);
+      const d = document.createElement("span");
+      d.className = "dot";
+      d.style.background = p ? p.color : "#888";
+      d.title = p ? p.name : "?";
+      dots.append(d);
+    });
+    head.append(dots);
+    const eb = document.createElement("button");
+    eb.className = "btn small edit";
+    eb.textContent = "✎";
+    eb.title = "Open this bar in the single-bar editor";
+    eb.addEventListener("click", e => {
+      e.stopPropagation();
+      S.barIdx = i;
+      while (S.bars.length <= i) S.bars.push([]);
+      S.gridView = 1;
+      try { localStorage.setItem("toneComposerV2.gridView", "1"); } catch (err) {}
+      renderAll();
+    });
+    head.append(eb);
+    cell.append(head);
+    if (i < S.bars.length) cell.append(miniBarSvg(i));
+    else {
+      const em = document.createElement("div");
+      em.className = "gridEmpty";
+      em.textContent = "empty — tap to create";
+      cell.append(em);
+    }
+    cell.addEventListener("click", () => {
+      while (S.bars.length <= i) S.bars.push([]);
+      S.barIdx = i;
+      renderAll();
+    });
+    wrap.append(cell);
+  }
 }
 
 function renderPatPanel() {
@@ -5169,7 +5482,7 @@ function renderSaved() {
 
 function renderAll() {
   renderControls(); renderBarNav(); renderStatus();
-  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
+  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
 }
 
 /* ─────────────── wiring ─────────────── */
@@ -5180,6 +5493,7 @@ $("stopBtn").addEventListener("click", () => { if (S.playing) stopPlayback(); })
 function startNewComposition(mode) {
   stopPlayback(); midiPanic();
   S.bars = [[]]; S.barIdx = 0;
+  S.bank = [];
   S.loop = null; S.loopPickStart = null;
   S.colorRules = [];
   S.selectedId = null; S.selectedMidi = null; S.alignPending = null;
@@ -5563,6 +5877,14 @@ function renderMenus() {
   da.append(mSep(), an);
   /* View */
   const dv = $("ddView");
+  dv.append(mHead("Bars view"));
+  [[1, "Single bar"], [4, "4 bars (2 × 2)"], [8, "8 bars (4 × 2)"], [12, "12 bars (4 × 3)"], [16, "16 bars (4 × 4)"]]
+    .forEach(([n, l]) => dv.append(mItem(l, () => {
+      S.gridView = n;
+      try { localStorage.setItem("toneComposerV2.gridView", String(n)); } catch (e) {}
+      renderAll();
+    }, { check: S.gridView === n })));
+  dv.append(mSep());
   dv.replaceChildren();
   dv.append(
     mItem("Tone keys", () => {
@@ -5609,6 +5931,7 @@ function renderMenus() {
   dp.append(mItem(S.patEdit ? "Exit Pattern Studio" : "Open Pattern Studio…",
     () => { S.patEdit ? exitPatternStudio() : enterPatternStudio(); }, { check: !!S.patEdit }));
   dp.append(mItem("Insert pattern into composition…", () => openPatInsertModal(null)));
+  dp.append(mItem("Add pattern to bank…", openBankAdd));
   dp.append(mSep(), mHead(`Library (${S.patterns.length})`));
   if (!S.patterns.length) {
     const d0 = document.createElement("div");
@@ -5774,7 +6097,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 28;
+const BUILD = 29;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
