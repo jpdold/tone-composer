@@ -4725,31 +4725,69 @@ function openBankAssign(i) {
 function miniBarSvg(bi) {
   const b = S.bars[bi] || [];
   const span = Math.max(barLen(b), bankFloor(bi), 0.5);
-  const W = 220, H = 88, PL = 3, PR = 3, PT = 7, PB = 5;
-  const MX = t => PL + (t / span) * (W - PL - PR);
-  const MY = m => PT + (MIDI_MAX - m) / (MIDI_MAX - MIDI_MIN) * (H - PT - PB);
-  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", height: "auto", preserveAspectRatio: "none" });
+  const cols = S.gridView === 4 ? 2 : 4;
+  /* a real staff, scaled: same line system as the main view */
+  const step = cols === 2 ? 4 : 3;                       // px per semitone
+  const PLm = cols === 2 ? 34 : 27;                      // pitch-label gutter
+  const PTm = 7, PBm = 7, PRm = 4;
+  const H = PTm + (MIDI_MAX - MIDI_MIN) * step + PBm;
+  const W = cols === 2 ? 470 : 310;
+  const MX = t => PLm + (t / span) * (W - PLm - PRm);
+  const MY = m => PTm + (MIDI_MAX - m) * step;
+  const T = TH();
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", height: "auto" });
   svg.style.display = "block";
+  svg.style.background = T.sheet;
+  svg.style.borderRadius = "4px";
+
+  /* line system: octave Fs bold, naturals solid, sharps light — labels decimate
+     when the semitone step is too small to letter every line */
+  const labEvery = step >= 8 ? 1 : step >= 5 ? 2 : 4;
+  for (let m = MIDI_MIN; m <= MIDI_MAX; m++) {
+    const y = MY(m), oct = OCTAVE_FS.includes(m), sh = isSharp(m);
+    svg.append(svgEl("line", { x1: PLm - 2, x2: W - PRm, y1: y, y2: y,
+      stroke: oct ? T.lineOct : sh ? T.lineSharp : T.lineNat,
+      "stroke-width": oct ? Math.max(1, T.wOct * 0.7) : Math.max(0.5, T.wNat * 0.55) }));
+    if (oct || (m - MIDI_MIN) % labEvery === 0)
+      svg.append(svgEl("text", { x: PLm - 3.5, y: y + 2, "text-anchor": "end",
+        "font-size": oct ? 6.2 : 5.4, "font-weight": oct ? 700 : 400,
+        fill: oct ? T.labOct : sh ? T.labSharp : T.labNat }, dName(m)));
+  }
+  /* right edge: bar end */
+  svg.append(svgEl("line", { x1: W - PRm, x2: W - PRm, y1: PTm - 3, y2: H - PBm + 3,
+    stroke: T.lineOct, "stroke-width": 1 }));
+
+  const nh = Math.max(step - 0.8, 2.2);                  // note thickness
   b.forEach(ev => {
     if (ev.type === "note") {
       ev.midis.forEach(m => svg.append(svgEl("rect", {
-        x: MX(ev.start), y: MY(m) - 1.5,
-        width: Math.max((ev.dur / span) * (W - PL - PR), 2), height: 3,
-        rx: 1, fill: ev.color || "#333", opacity: ev.muted ? 0.3 : 0.95 })));
+        x: MX(ev.start), y: MY(m) - nh / 2,
+        width: Math.max((ev.dur / span) * (W - PLm - PRm), 2), height: nh,
+        rx: 1, fill: toneColor(ev, m) || T.note, opacity: ev.muted ? 0.3 : 0.95 })));
     } else if (ev.type === "rest") {
-      svg.append(svgEl("line", { x1: MX(ev.start), x2: MX(ev.start + ev.dur), y1: H - 4, y2: H - 4,
-        stroke: "#999", "stroke-width": 2, "stroke-dasharray": "2 3" }));
+      svg.append(svgEl("rect", { x: MX(ev.start), y: PTm, width: Math.max((ev.dur / span) * (W - PLm - PRm), 2),
+        height: H - PTm - PBm, fill: T.restFill }));
     } else if (ev.type === "bass") {
-      svg.append(svgEl("rect", { x: MX(ev.start), y: MY(ev.midi) - 1.5,
-        width: Math.max((ev.dur / span) * (W - PL - PR), 2), height: 3, fill: "#555" }));
+      svg.append(svgEl("rect", { x: MX(ev.start), y: MY(ev.midi) - nh / 2,
+        width: Math.max((ev.dur / span) * (W - PLm - PRm), 2), height: nh, fill: T.note, opacity: 0.7 }));
     } else if (ev.type === "pattern") {
       const p = patById(ev.pid);
       const col = p ? p.color : "#888";
-      const wpx = Math.max((patInstSpan(ev) / span) * (W - PL - PR), 6);
-      svg.append(svgEl("rect", { x: MX(ev.start), y: PT, width: wpx, height: H - PT - PB,
-        fill: col, opacity: 0.2 }));
-      svg.append(svgEl("text", { x: MX(ev.start) + 2, y: PT + 8, "font-size": 7, "font-weight": 700, fill: col },
-        p ? p.name : "?"));
+      const wpx = Math.max((patInstSpan(ev) / span) * (W - PLm - PRm), 6);
+      svg.append(svgEl("rect", { x: MX(ev.start), y: PTm, width: wpx, height: H - PTm - PBm,
+        fill: col, opacity: 0.14 }));
+      if (p) p.events.forEach(pe => {
+        if (pe.type !== "note") return;
+        pe.midis.forEach(m => {
+          const mm = m + (ev.tr || 0);
+          if (mm < MIDI_MIN || mm > MIDI_MAX) return;
+          svg.append(svgEl("rect", { x: MX(ev.start + pe.start), y: MY(mm) - nh / 2,
+            width: Math.max((pe.dur / span) * (W - PLm - PRm), 1.6), height: nh,
+            fill: col, opacity: 0.8, rx: 1 }));
+        });
+      });
+      svg.append(svgEl("text", { x: MX(ev.start) + 2, y: PTm + 7, "font-size": 6.5, "font-weight": 700,
+        fill: col }, p ? p.name : "?"));
     }
   });
   return svg;
@@ -6125,7 +6163,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 30;
+const BUILD = 31;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
