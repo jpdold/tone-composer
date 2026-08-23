@@ -119,6 +119,8 @@
   .staffFrame { overflow-x: auto; border: 1px solid #eee; border-radius: 6px; margin-bottom: 10px;
     -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
   .staffFrame.studio { border: 2.5px dashed #1565c0; padding: 7px 9px; }
+  #staffNav { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin: 2px 2px 8px; }
+  #staffNav .navLab { font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 76px; text-align: center; }
   #bankStrip { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 2px 2px 10px; }
   .bankLab { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #666; margin-top: 16px; }
   .bankCard { border: 1.5px solid #000; border-radius: 6px; padding: 4px; display: flex; flex-direction: column; gap: 3px; align-items: center; }
@@ -436,6 +438,7 @@
         <button id="scrollLBtn" class="btn small" title="Scroll the staff left">⟵</button>
         <button id="scrollRBtn" class="btn small" title="Scroll the staff right">⟶</button>
       </div>
+      <div id="staffNav" style="display:none"></div>
       <div id="bankStrip" style="display:none"></div>
       <div id="gridWrap" style="display:none"></div>
       <div class="staffFrame"><svg id="staff" style="display:block;background:#fff"></svg></div>
@@ -4569,6 +4572,31 @@ function bankBarsLabel(be) {
   }
   return "bars " + parts.join(",");
 }
+function renderStaffNav() {
+  const el = $("staffNav");
+  const show = !S.patEdit;
+  el.style.display = show ? "flex" : "none";
+  el.replaceChildren();
+  if (!show) return;
+  const n = S.bars.length;
+  const nb = (txt, title, fn, dis) => {
+    const b = document.createElement("button");
+    b.className = "btn small";
+    b.textContent = txt; b.title = title; b.disabled = !!dis || S.playing;
+    b.addEventListener("click", fn);
+    el.append(b);
+  };
+  const go = i => { S.barIdx = Math.max(0, Math.min(n - 1, i)); renderAll(); };
+  nb("⏮", "First bar", () => go(0), S.barIdx === 0);
+  nb("◀", "Previous bar", () => go(S.barIdx - 1), S.barIdx === 0);
+  const lab = document.createElement("span");
+  lab.className = "navLab";
+  lab.textContent = `Bar ${S.barIdx + 1} / ${n}`;
+  el.append(lab);
+  nb("▶", "Next bar", () => go(S.barIdx + 1), S.barIdx >= n - 1);
+  nb("⏭", "Last bar", () => go(n - 1), S.barIdx >= n - 1);
+  nb("⏭ End bar here", "Finish this bar at its current length and move to a fresh bar", endBar);
+}
 function renderBank() {
   const el = $("bankStrip");
   const show = !S.patEdit && (S.bank.length > 0 || S.gridView > 1);
@@ -5482,7 +5510,7 @@ function renderSaved() {
 
 function renderAll() {
   renderControls(); renderBarNav(); renderStatus();
-  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
+  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
 }
 
 /* ─────────────── wiring ─────────────── */
@@ -5877,6 +5905,7 @@ function renderMenus() {
   da.append(mSep(), an);
   /* View */
   const dv = $("ddView");
+  dv.replaceChildren();
   dv.append(mHead("Bars view"));
   [[1, "Single bar"], [4, "4 bars (2 × 2)"], [8, "8 bars (4 × 2)"], [12, "12 bars (4 × 3)"], [16, "16 bars (4 × 4)"]]
     .forEach(([n, l]) => dv.append(mItem(l, () => {
@@ -5885,7 +5914,6 @@ function renderMenus() {
       renderAll();
     }, { check: S.gridView === n })));
   dv.append(mSep());
-  dv.replaceChildren();
   dv.append(
     mItem("Tone keys", () => {
       S.showKeys = !S.showKeys;
@@ -6097,7 +6125,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 29;
+const BUILD = 30;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
