@@ -4722,26 +4722,73 @@ function openBankAssign(i) {
 }
 
 /* ── multi-bar grid view ── */
-function miniBarSvg(bi) {
-  const b = S.bars[bi] || [];
-  const span = Math.max(barLen(b), bankFloor(bi), 0.5);
-  const cols = S.gridView === 4 ? 2 : 4;
-  /* a real staff, scaled: same line system as the main view */
-  const step = cols === 2 ? 4 : 3;                       // px per semitone
-  const PLm = cols === 2 ? 34 : 27;                      // pitch-label gutter
-  const PTm = 7, PBm = 7, PRm = 4;
+function drawMiniEvents(svg, b, MXof, MY, nh, PTm, PBm, H) {
+  b.forEach(ev => {
+    const MX = MXof;
+    if (ev.type === "note") {
+      ev.midis.forEach(m => svg.append(svgEl("rect", {
+        x: MX(ev.start), y: MY(m) - nh / 2,
+        width: Math.max(MX(ev.start + ev.dur) - MX(ev.start), 2), height: nh,
+        rx: 1, fill: toneColor(ev, m) || TH().note, opacity: ev.muted ? 0.3 : 0.95 })));
+    } else if (ev.type === "rest") {
+      svg.append(svgEl("rect", { x: MX(ev.start), y: PTm,
+        width: Math.max(MX(ev.start + ev.dur) - MX(ev.start), 2),
+        height: H - PTm - PBm, fill: TH().restFill }));
+    } else if (ev.type === "bass") {
+      svg.append(svgEl("rect", { x: MX(ev.start), y: MY(ev.midi) - nh / 2,
+        width: Math.max(MX(ev.start + ev.dur) - MX(ev.start), 2), height: nh,
+        fill: TH().note, opacity: 0.7 }));
+    } else if (ev.type === "pattern") {
+      const p = patById(ev.pid);
+      const col = p ? p.color : "#888";
+      const x0 = MX(ev.start);
+      svg.append(svgEl("rect", { x: x0, y: PTm, width: Math.max(MX(ev.start + patInstSpan(ev)) - x0, 6),
+        height: H - PTm - PBm, fill: col, opacity: 0.13 }));
+      if (p) p.events.forEach(pe => {
+        if (pe.type !== "note") return;
+        pe.midis.forEach(m => {
+          const mm = m + (ev.tr || 0);
+          if (mm < MIDI_MIN || mm > MIDI_MAX) return;
+          svg.append(svgEl("rect", { x: MX(ev.start + pe.start), y: MY(mm) - nh / 2,
+            width: Math.max(MX(ev.start + pe.start + pe.dur) - MX(ev.start + pe.start), 1.6),
+            height: nh, fill: col, opacity: 0.8, rx: 1 }));
+        });
+      });
+      svg.append(svgEl("text", { x: x0 + 2, y: PTm + 7, "font-size": 6.5, "font-weight": 700,
+        fill: col }, p ? p.name : "?"));
+    }
+  });
+}
+
+/* one ROW of the continuous staff: staff lines run unbroken across `cols` bars,
+   a single pitch gutter at the left, barlines between bars, shared time scale */
+function gridRowSvg(startBar, cols) {
+  const step = cols === 2 ? 4 : 3;
+  const PLm = cols === 2 ? 38 : 30, PRm = 6, PTm = 17, PBm = 8;
   const H = PTm + (MIDI_MAX - MIDI_MIN) * step + PBm;
-  const W = cols === 2 ? 470 : 310;
-  const MX = t => PLm + (t / span) * (W - PLm - PRm);
-  const MY = m => PTm + (MIDI_MAX - m) * step;
+  const W = 960;
   const T = TH();
+  const MY = m => PTm + (MIDI_MAX - m) * step;
+  const nh = Math.max(step - 0.8, 2.2);
   const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", height: "auto" });
   svg.style.display = "block";
   svg.style.background = T.sheet;
   svg.style.borderRadius = "4px";
 
-  /* line system: octave Fs bold, naturals solid, sharps light — labels decimate
-     when the semitone step is too small to letter every line */
+  /* the bars of this row and their PROPORTIONAL widths on one shared time scale */
+  const segs = [];
+  for (let i = 0; i < cols; i++) {
+    const bi = startBar + i;
+    const exists = bi < S.bars.length;
+    const span = Math.max(exists ? barLen(S.bars[bi]) : 0, bankFloor(bi), 0.5);
+    segs.push({ bi, exists, span });
+  }
+  const totalSpan = segs.reduce((a, g) => a + g.span, 0);
+  const avail = W - PLm - PRm;
+  let x = PLm;
+  segs.forEach(g => { g.x0 = x; g.w = (g.span / totalSpan) * avail; x += g.w; g.x1 = x; });
+
+  /* continuous line system + one gutter of labels */
   const labEvery = step >= 8 ? 1 : step >= 5 ? 2 : 4;
   for (let m = MIDI_MIN; m <= MIDI_MAX; m++) {
     const y = MY(m), oct = OCTAVE_FS.includes(m), sh = isSharp(m);
@@ -4753,103 +4800,89 @@ function miniBarSvg(bi) {
         "font-size": oct ? 6.2 : 5.4, "font-weight": oct ? 700 : 400,
         fill: oct ? T.labOct : sh ? T.labSharp : T.labNat }, dName(m)));
   }
-  /* right edge: bar end */
-  svg.append(svgEl("line", { x1: W - PRm, x2: W - PRm, y1: PTm - 3, y2: H - PBm + 3,
-    stroke: T.lineOct, "stroke-width": 1 }));
 
-  const nh = Math.max(step - 0.8, 2.2);                  // note thickness
-  b.forEach(ev => {
-    if (ev.type === "note") {
-      ev.midis.forEach(m => svg.append(svgEl("rect", {
-        x: MX(ev.start), y: MY(m) - nh / 2,
-        width: Math.max((ev.dur / span) * (W - PLm - PRm), 2), height: nh,
-        rx: 1, fill: toneColor(ev, m) || T.note, opacity: ev.muted ? 0.3 : 0.95 })));
-    } else if (ev.type === "rest") {
-      svg.append(svgEl("rect", { x: MX(ev.start), y: PTm, width: Math.max((ev.dur / span) * (W - PLm - PRm), 2),
-        height: H - PTm - PBm, fill: T.restFill }));
-    } else if (ev.type === "bass") {
-      svg.append(svgEl("rect", { x: MX(ev.start), y: MY(ev.midi) - nh / 2,
-        width: Math.max((ev.dur / span) * (W - PLm - PRm), 2), height: nh, fill: T.note, opacity: 0.7 }));
-    } else if (ev.type === "pattern") {
-      const p = patById(ev.pid);
-      const col = p ? p.color : "#888";
-      const wpx = Math.max((patInstSpan(ev) / span) * (W - PLm - PRm), 6);
-      svg.append(svgEl("rect", { x: MX(ev.start), y: PTm, width: wpx, height: H - PTm - PBm,
-        fill: col, opacity: 0.14 }));
-      if (p) p.events.forEach(pe => {
-        if (pe.type !== "note") return;
-        pe.midis.forEach(m => {
-          const mm = m + (ev.tr || 0);
-          if (mm < MIDI_MIN || mm > MIDI_MAX) return;
-          svg.append(svgEl("rect", { x: MX(ev.start + pe.start), y: MY(mm) - nh / 2,
-            width: Math.max((pe.dur / span) * (W - PLm - PRm), 1.6), height: nh,
-            fill: col, opacity: 0.8, rx: 1 }));
-        });
-      });
-      svg.append(svgEl("text", { x: MX(ev.start) + 2, y: PTm + 7, "font-size": 6.5, "font-weight": 700,
-        fill: col }, p ? p.name : "?"));
-    }
+  segs.forEach((g, i) => {
+    const local = t => g.x0 + (t / g.span) * g.w;
+    if (g.exists) drawMiniEvents(svg, S.bars[g.bi], local, MY, nh, PTm, PBm, H);
+
+    /* barline at the segment's right edge; composition's final bar gets a double */
+    const isFinal = g.bi === S.bars.length - 1;
+    svg.append(svgEl("line", { x1: g.x1, x2: g.x1, y1: PTm - 4, y2: H - PBm + 4,
+      stroke: T.lineOct, "stroke-width": 1.5 }));
+    if (isFinal)
+      svg.append(svgEl("line", { x1: g.x1 - 3, x2: g.x1 - 3, y1: PTm - 4, y2: H - PBm + 4,
+        stroke: T.lineOct, "stroke-width": 0.8 }));
+
+    /* header: bar number (+ state), bank dots, ✎ */
+    const selMark = g.bi === S.barIdx;
+    svg.append(svgEl("text", { x: g.x0 + 3, y: 10, "font-size": 8.5, "font-weight": 700,
+      fill: g.exists ? T.labOct : T.labSharp },
+      `Bar ${g.bi + 1}${g.exists ? "" : " (empty — tap to create)"}`));
+    let dx = g.x0 + 3;
+    S.bank.forEach(be => {
+      if (be.muted || !bankAppliesTo(be, g.bi)) return;
+      const p = patById(be.pid);
+      svg.append(svgEl("circle", { cx: g.x0 + g.w - 8 - (dx - g.x0 - 3), cy: 7, r: 3.2,
+        fill: p ? p.color : "#888", stroke: "rgba(0,0,0,0.3)", "stroke-width": 0.6 }));
+      dx += 9;
+    });
+    const ped = svgEl("text", { x: g.x1 - 12, y: H - PBm + 2, "font-size": 9, fill: T.labOct,
+      "font-weight": 700 }, "✎");
+    ped.style.cursor = "pointer";
+    ped.addEventListener("click", e => {
+      e.stopPropagation();
+      while (S.bars.length <= g.bi) S.bars.push([]);
+      S.barIdx = g.bi;
+      S.gridView = 1;
+      try { localStorage.setItem("toneComposerV2.gridView", "1"); } catch (err) {}
+      renderAll();
+    });
+    svg.append(ped);
+
+    /* selection / playing indication */
+    if (selMark)
+      svg.append(svgEl("rect", { x: g.x0 + 1, y: PTm - 5, width: g.w - 2, height: H - PTm - PBm + 10,
+        fill: "none", stroke: "#000", "stroke-width": 2, rx: 3, "pointer-events": "none" }));
+    if (S.playing && S.playBarIdx === g.bi)
+      svg.append(svgEl("rect", { x: g.x0 + 1, y: PTm - 5, width: g.w - 2, height: H - PTm - PBm + 10,
+        fill: "rgba(27,94,32,0.10)", stroke: "#1b5e20", "stroke-width": 2, rx: 3, "pointer-events": "none" }));
+
+    /* tap surface: select; tap the selected bar again to edit it */
+    const hit = svgEl("rect", { x: g.x0, y: 0, width: g.w, height: H, fill: "transparent" });
+    hit.style.cursor = "pointer";
+    attachTap(hit, () => {
+      if (S.barIdx === g.bi && g.exists) {
+        S.gridView = 1;
+        try { localStorage.setItem("toneComposerV2.gridView", "1"); } catch (err) {}
+      } else {
+        while (S.bars.length <= g.bi) S.bars.push([]);
+        S.barIdx = g.bi;
+      }
+      renderAll();
+    });
+    svg.append(hit);
   });
   return svg;
 }
+
 function renderGridView() {
   const wrap = $("gridWrap");
   const on = S.gridView > 1 && !S.patEdit;
   const frame = document.querySelector(".staffFrame");
   if (frame) frame.style.display = on ? "none" : "";
-  wrap.style.display = on ? "grid" : "none";
+  wrap.style.display = on ? "block" : "none";
   wrap.replaceChildren();
   if (!on) return;
   const cols = S.gridView === 4 ? 2 : 4;
-  wrap.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-  for (let i = 0; i < S.gridView; i++) {
-    const cell = document.createElement("div");
-    cell.className = "gridCell" + (i === S.barIdx ? " selCell" : "") +
-      (S.playing && S.playBarIdx === i ? " playCell" : "");
-    const head = document.createElement("div");
-    head.className = "gridHead";
-    const t = document.createElement("span");
-    t.textContent = `Bar ${i + 1}`;
-    head.append(t);
-    const dots = document.createElement("span");
-    dots.className = "dots";
-    S.bank.forEach(be => {
-      if (be.muted || !bankAppliesTo(be, i)) return;
-      const p = patById(be.pid);
-      const d = document.createElement("span");
-      d.className = "dot";
-      d.style.background = p ? p.color : "#888";
-      d.title = p ? p.name : "?";
-      dots.append(d);
-    });
-    head.append(dots);
-    const eb = document.createElement("button");
-    eb.className = "btn small edit";
-    eb.textContent = "✎";
-    eb.title = "Open this bar in the single-bar editor";
-    eb.addEventListener("click", e => {
-      e.stopPropagation();
-      S.barIdx = i;
-      while (S.bars.length <= i) S.bars.push([]);
-      S.gridView = 1;
-      try { localStorage.setItem("toneComposerV2.gridView", "1"); } catch (err) {}
-      renderAll();
-    });
-    head.append(eb);
-    cell.append(head);
-    if (i < S.bars.length) cell.append(miniBarSvg(i));
-    else {
-      const em = document.createElement("div");
-      em.className = "gridEmpty";
-      em.textContent = "empty — tap to create";
-      cell.append(em);
-    }
-    cell.addEventListener("click", () => {
-      while (S.bars.length <= i) S.bars.push([]);
-      S.barIdx = i;
-      renderAll();
-    });
-    wrap.append(cell);
+  const rows = S.gridView / cols;
+  const hint = document.createElement("div");
+  hint.style.cssText = "font-size:11px;color:#888;margin:0 2px 4px";
+  hint.textContent = "One continuous staff — tap a bar to select it; tap it again (or ✎) to open it in the editor.";
+  wrap.append(hint);
+  for (let r = 0; r < rows; r++) {
+    const row = gridRowSvg(r * cols, cols);
+    row.style.marginBottom = "10px";
+    wrap.append(row);
   }
 }
 
@@ -6163,7 +6196,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 31;
+const BUILD = 32;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
