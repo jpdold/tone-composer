@@ -119,6 +119,24 @@
   .staffFrame { overflow-x: auto; border: 1px solid #eee; border-radius: 6px; margin-bottom: 10px;
     -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
   .staffFrame.studio { border: 2.5px dashed #1565c0; padding: 7px 9px; }
+  #pcompStrip { border: 2px solid #1565c0; border-radius: 8px; padding: 8px; margin: 2px 2px 10px;
+    display: flex; gap: 8px; align-items: flex-start; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .pcTitle { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #1565c0;
+    font-weight: 700; margin: 16px 4px 0 0; white-space: nowrap; }
+  .pcCard { border: 1.5px solid #000; border-radius: 6px; padding: 4px; display: flex; flex-direction: column;
+    gap: 3px; align-items: center; flex: 0 0 auto; }
+  .pcCard.off { opacity: 0.45; }
+  .pcBox { width: 52px; height: 52px; border-radius: 5px; display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; border: 1px solid rgba(0,0,0,0.25); text-align: center; padding: 2px; }
+  .pcMeta { font-size: 9px; color: #666; max-width: 116px; text-align: center; }
+  .pcBtns { display: flex; flex-wrap: wrap; gap: 2px; justify-content: center; max-width: 116px; }
+  .pcBtns button { min-width: 24px; height: 21px; font-size: 10px; padding: 0 4px; }
+  .pcAdd { width: 52px; height: 52px; border-radius: 6px; border: 2px dashed #1565c0; background: none;
+    font-size: 22px; color: #1565c0; cursor: pointer; margin-top: 14px; flex: 0 0 auto; }
+  #pcompBar { border: 2px solid #1565c0; border-radius: 8px; padding: 8px 10px; margin: 2px 2px 10px;
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: rgba(21,101,192,0.06); }
+  #pcompBar .pcMsg { font-size: 12px; font-weight: 600; }
+  body.theme-gy .pcMeta { color: #ddd; }
   #staffNav { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin: 2px 2px 8px; }
   #staffNav .navLab { font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 76px; text-align: center; }
   #bankStrip { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 2px 2px 10px; }
@@ -438,6 +456,8 @@
         <button id="scrollLBtn" class="btn small" title="Scroll the staff left">⟵</button>
         <button id="scrollRBtn" class="btn small" title="Scroll the staff right">⟶</button>
       </div>
+      <div id="pcompStrip" style="display:none"></div>
+      <div id="pcompBar" style="display:none"></div>
       <div id="staffNav" style="display:none"></div>
       <div id="bankStrip" style="display:none"></div>
       <div id="gridWrap" style="display:none"></div>
@@ -625,6 +645,10 @@ const S = {
   gridView: (() => { try { const v = parseInt(localStorage.getItem("toneComposerV2.gridView"), 10);
     return [1, 4, 8, 12, 16].includes(v) ? v : 1; } catch (e) { return 1; } })(),
   bank: [],                        // pattern bank: {pid, bars:"all"|[idx], pmode, pcount, muted}
+  pcomp: [],                       // pattern composer rack: {pid, on}
+  pcompOpen: false,
+  pcompDraft: null,                // {mode:"new"} | {mode:"edit", pid} | null
+  pcompPrevSpacing: null,
   showChips: (typeof localStorage !== "undefined" && localStorage.getItem("toneComposerV2.showChips") === "1"),
   spacing: (typeof localStorage !== "undefined" && SPACINGS_VALID(localStorage.getItem("toneComposerV2.spacing"))) || "default",
   voice: "sine",                   // "sine" | "piano" — per-composition tone generator
@@ -1782,8 +1806,9 @@ function saveComp() {
   saved[name] = { version: 2.4, bars: S.bars, loop: S.loop, colorRules: S.colorRules,
     notation: S.notation, tonal: S.tonal, voice: S.voice,
     bank: S.bank,
+    pcomp: S.pcomp,
     patterns: S.patterns.filter(p => S.bars.flat().some(e => e.type === "pattern" && e.pid === p.pid) ||
-                                     S.bank.some(b => b.pid === p.pid)),
+                                     S.bank.some(b => b.pid === p.pid) || S.pcomp.some(x => x.pid === p.pid)),
     savedAt: Date.now() };
   flash(writeSaved(saved) ? (existed ? `Updated "${name}".` : `Saved "${name}".`)
                           : "Save failed — storage unavailable.");
@@ -1857,6 +1882,9 @@ function restoreExtras(d) {
           pmode: ["li", "lo"].includes(b.pmode) ? b.pmode : "once",
           pcount: Math.max(1, parseInt(b.pcount, 10) || 1),
           muted: !!b.muted }))
+    : [];
+  S.pcomp = Array.isArray(d.pcomp)
+    ? d.pcomp.filter(x => x && x.pid != null).map(x => ({ pid: x.pid, on: x.on !== false }))
     : [];
   S.colorRules = Array.isArray(d.colorRules)
     ? d.colorRules.filter(r => r && Number.isInteger(r.lo) && Number.isInteger(r.hi) &&
@@ -1986,8 +2014,9 @@ function exportComp() {
   const blob = new Blob([JSON.stringify({ version: 2.4, bars: S.bars, loop: S.loop, colorRules: S.colorRules,
     notation: S.notation, tonal: S.tonal, voice: S.voice,
     bank: S.bank,
+    pcomp: S.pcomp,
     patterns: S.patterns.filter(p => S.bars.flat().some(e => e.type === "pattern" && e.pid === p.pid) ||
-                                     S.bank.some(b => b.pid === p.pid)) }, null, 2)],
+                                     S.bank.some(b => b.pid === p.pid) || S.pcomp.some(x => x.pid === p.pid)) }, null, 2)],
     { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -4023,6 +4052,18 @@ function patSetStore(groups) {
 }
 const patBarCap = () => (TS_BEATS[S.patEdit.sig] || 4) * (60 / S.patEdit.tempo);
 const patGroupCap = () => patBarCap() * S.patEdit.groupLen;
+function pcompStore() {
+  try { localStorage.setItem("toneComposerV2.pcomp", JSON.stringify(S.pcomp)); } catch (e) {}
+}
+function pcompLoad() {
+  try {
+    const v = JSON.parse(localStorage.getItem("toneComposerV2.pcomp") || "[]");
+    S.pcomp = Array.isArray(v) ? v.filter(x => x && patById(x.pid)).map(x => ({ pid: x.pid, on: x.on !== false })) : [];
+  } catch (e) { S.pcomp = []; }
+}
+function pcompOnShelf(pid) {
+  return !!(S.patEdit && S.patEdit.groups.some(g => g.pid === pid));
+}
 function patUsedSlots() { return S.patEdit.groups.reduce((a, g) => a + g.len, 0); }
 /* coverage check: notes+rests must tile [0, cap] with no holes (3 ms tolerance) */
 function patCoverage(evts, cap) {
@@ -4125,6 +4166,8 @@ function patDeletePattern(pid) {
   }
   S.bars.forEach((b, i) => S.bars[i] = b.filter(e => !(e.type === "pattern" && e.pid === pid)));
   S.bank = S.bank.filter(b => b.pid !== pid);
+  S.pcomp = S.pcomp.filter(x => x.pid !== pid);
+  pcompStore();
 }
 
 function openShelfModal(pid) {
@@ -4582,6 +4625,255 @@ function bankBarsLabel(be) {
   }
   return "bars " + parts.join(",");
 }
+/* ── Pattern Composer ───────────────────────────────────────────────────────
+   A rack of patterns that play together. Boxes may hold shelf patterns or
+   composer-local ones (created here, promoted to the shelf only on request). */
+function pcompOpen() {
+  if (!S.patEdit) enterPatternStudio();
+  S.pcompOpen = true;
+  pcompLoad();
+  flash("Pattern Composer — ＋ adds a pattern; enabled patterns play together.");
+  renderAll();
+}
+function pcompClose() {
+  if (S.pcompDraft) { flash("Finish or cancel the pattern you're entering first."); return; }
+  S.pcompOpen = false;
+  renderAll();
+}
+function pcompStartDraft(mode, pid) {
+  if (S.bars[0].length && mode === "new" && !confirmDraftClear()) return;
+  S.pcompDraft = { mode, pid: pid || null };
+  S.pcompPrevSpacing = S.spacing;
+  S.spacing = "large";                       // expand the staff for comfortable entry
+  if (mode === "new") { S.bars = [[]]; S.barIdx = 0; }
+  else {
+    const p = patById(pid);
+    if (!p) { S.pcompDraft = null; return; }
+    S.bars = [p.events.map(e => ({ id: idCounter++, type: e.type, start: e.start, dur: e.dur,
+      midis: e.midis ? [...e.midis] : undefined, vel: e.vel, shape: e.shape }))];
+    S.barIdx = 0;
+  }
+  undoStack.length = 0;
+  flash(mode === "new"
+    ? "Enter notes and rests, then press OK — the pattern ends where your content ends."
+    : `Editing ${patById(pid).name} — press OK to save the changes.`);
+  renderAll();
+}
+function confirmDraftClear() {
+  return window.confirm("This clears the studio staff to start a new pattern. Proceed?");
+}
+function pcompEndDraft() {
+  S.pcompDraft = null;
+  if (S.pcompPrevSpacing) { S.spacing = S.pcompPrevSpacing; S.pcompPrevSpacing = null; }
+}
+function pcompDraftEvents() {
+  /* same rule as ⏭ End bar here: content length wins, gaps are rejected */
+  const evts = S.bars[0].filter(e => e.type === "note" || e.type === "rest");
+  if (!evts.length) { flash("Nothing entered yet."); return null; }
+  const sorted = [...evts].sort((a, b) => a.start - b.start);
+  let frontier = 0;
+  for (const ev of sorted) {
+    if (ev.start > frontier + 0.006) {
+      flash(`Gap at ${fmt(frontier)}–${fmt(ev.start)} s — fill it with a rest first (⌷ Gap→Rest).`);
+      return null;
+    }
+    frontier = Math.max(frontier, evEnd(ev));
+  }
+  return { evts, span: r3n(frontier) };
+}
+function pcompOk() {
+  const d = S.pcompDraft;
+  if (!d) return;
+  const res = pcompDraftEvents();
+  if (!res) return;
+  const mapped = res.evts.map(e => ({ type: e.type, start: r3n(e.start), dur: r3n(e.dur),
+    midis: e.midis ? [...e.midis] : undefined, vel: e.vel, shape: e.shape }));
+  if (d.mode === "new") {
+    const pat = { pid: newPid(), name: `C${S.pcomp.length + 1}`, color: PAT_DEFAULT_COLOR,
+      tempo: S.patEdit.tempo, sig: S.patEdit.sig, nbars: 1, span: res.span, events: mapped };
+    S.patterns.push(pat); patStore();
+    S.pcomp.push({ pid: pat.pid, on: true }); pcompStore();
+    flash(`${pat.name} added to the composer (${fmt(res.span)} s). It is not on the shelf yet — use ⇧ to put it there.`);
+  } else {
+    const p = patById(d.pid);
+    if (p) {
+      p.events = mapped; p.span = res.span;
+      patStore();
+      flash(`${p.name} updated (${fmt(res.span)} s) — every instance and bank entry follows.`);
+    }
+  }
+  pcompEndDraft();
+  S.bars = [[]]; S.barIdx = 0;
+  renderAll();
+}
+function pcompCancel() {
+  pcompEndDraft();
+  S.bars = [[]]; S.barIdx = 0;
+  flash("Cancelled.");
+  renderAll();
+}
+function pcompPlayAll() {
+  patPreviewStop();
+  if (S.playing) stopPlayback();
+  const live = S.pcomp.filter(x => x.on && patById(x.pid) && patById(x.pid).span > 0);
+  if (!live.length) { flash("No patterns are switched on."); return; }
+  const longest = Math.max(...live.map(x => patById(x.pid).span));
+  const ctx = ensureCtx();
+  const doPlay = () => {
+    const t0 = ctx.currentTime + 0.1;
+    const state = { next: 0 };
+    const pump = () => {
+      /* every enabled pattern starts together at each cycle boundary and
+         short ones repeat to fill the longest one's span */
+      while (state.next < ctx.currentTime - t0 + 2.5) {
+        live.forEach(x => {
+          const p = patById(x.pid);
+          for (let off = 0; off < longest - 0.0005; off += p.span) {
+            p.events.forEach(pe => {
+              if (pe.type !== "note") return;
+              pe.midis.forEach(m => {
+                if (m >= MIDI_MIN && m <= MIDI_MAX)
+                  scheduleTone(ctx, t0, m, state.next + off + pe.start, shapeDur(pe), pe.vel, pe.shape);
+              });
+            });
+          }
+        });
+        state.next += longest;
+      }
+    };
+    patPrev = { evId: "pcomp", timer: setInterval(pump, 200) };
+    pump();
+    renderStatus();
+  };
+  if (ctx.state === "suspended") { try { ctx.resume().then(doPlay).catch(doPlay); } catch (e) { doPlay(); } }
+  else doPlay();
+}
+function openPcompAdd() {
+  const body = document.createElement("div");
+  const mk = (txt, cls, fn) => {
+    const b = document.createElement("button");
+    b.className = "btn" + (cls ? " " + cls : "");
+    b.textContent = txt;
+    b.addEventListener("click", fn);
+    return b;
+  };
+  const l1 = document.createElement("div"); l1.className = "mline";
+  if (S.patterns.length) {
+    const sel = document.createElement("select");
+    sel.className = "pitchSel";
+    S.patterns.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p.pid;
+      o.textContent = `${p.name} · ${fmt(p.span)} s${pcompOnShelf(p.pid) ? " · shelf" : ""}`;
+      sel.append(o);
+    });
+    l1.append(sel, mk("Add to composer", "active", () => {
+      const pid = Number(sel.value);
+      if (S.pcomp.some(x => x.pid === pid)) { flash("That pattern is already in the composer."); return; }
+      S.pcomp.push({ pid, on: true }); pcompStore();
+      closeModal(); renderAll();
+    }));
+  } else {
+    const n = document.createElement("div");
+    n.style.cssText = "font-size:12px;color:#666";
+    n.textContent = "No patterns exist yet — create one.";
+    l1.append(n);
+  }
+  const l2 = document.createElement("div"); l2.className = "mline";
+  l2.append(mk("✎ Create a new pattern", "active", () => { closeModal(); pcompStartDraft("new"); }),
+            mk("Cancel", "", closeModal));
+  body.append(l1, l2);
+  showModal("Add to Pattern Composer", body);
+}
+function renderPcomp() {
+  const strip = $("pcompStrip"), barEl = $("pcompBar");
+  const show = !!(S.patEdit && S.pcompOpen);
+  strip.style.display = show && !S.pcompDraft ? "flex" : "none";
+  barEl.style.display = show && S.pcompDraft ? "flex" : "none";
+  strip.replaceChildren(); barEl.replaceChildren();
+  if (!show) return;
+
+  if (S.pcompDraft) {
+    const msg = document.createElement("span");
+    msg.className = "pcMsg";
+    msg.textContent = S.pcompDraft.mode === "new"
+      ? "Entering a new pattern — every studio tool is available. OK ends the pattern where your content ends."
+      : `Editing ${(patById(S.pcompDraft.pid) || {}).name || "pattern"} — OK saves the changes.`;
+    const ok = document.createElement("button");
+    ok.className = "btn active"; ok.textContent = "OK";
+    ok.title = "Finish here (same rule as End bar here)";
+    ok.addEventListener("click", pcompOk);
+    const ca = document.createElement("button");
+    ca.className = "btn"; ca.textContent = "Cancel";
+    ca.addEventListener("click", pcompCancel);
+    barEl.append(msg, ok, ca);
+    return;
+  }
+
+  const title = document.createElement("span");
+  title.className = "pcTitle";
+  title.textContent = "Pattern Composer";
+  strip.append(title);
+  S.pcomp.forEach((x, i) => {
+    const p = patById(x.pid);
+    if (!p) return;
+    const card = document.createElement("div");
+    card.className = "pcCard" + (x.on ? "" : " off");
+    const box = document.createElement("div");
+    box.className = "pcBox";
+    box.style.background = p.color;
+    box.style.color = isLight(p.color) ? "#000" : "#fff";
+    box.textContent = p.name;
+    box.title = `${p.name} · ${fmt(p.span)} s${pcompOnShelf(x.pid) ? " · on the shelf" : " · composer only"}`;
+    const meta = document.createElement("div");
+    meta.className = "pcMeta";
+    meta.textContent = `${fmt(p.span)} s${pcompOnShelf(x.pid) ? "" : " · local"}`;
+    const btns = document.createElement("div");
+    btns.className = "pcBtns";
+    const bb = (txt, title2, fn, on) => {
+      const b = document.createElement("button");
+      b.className = "btn small" + (on ? " active" : "");
+      b.textContent = txt; b.title = title2;
+      b.addEventListener("click", fn);
+      btns.append(b);
+    };
+    bb(x.on ? "◉" : "○", x.on ? "On — plays with the others" : "Off — silent",
+       () => { x.on = !x.on; pcompStore(); renderAll(); }, x.on);
+    bb("▶", "Preview this pattern alone",
+       () => patPreviewPlay({ type: "pattern", id: "pc" + i, pid: x.pid, start: 0, pmode: "once", pcount: 1, tr: 0 }));
+    bb("✎", "Edit this pattern", () => pcompStartDraft("edit", x.pid));
+    if (!pcompOnShelf(x.pid))
+      bb("⇧", "Put this pattern on the shelf", () => {
+        if (patUsedSlots() + p.nbars > PAT_SLOTS) { flash("The shelf is full."); return; }
+        S.patEdit.groups.push({ len: p.nbars, pid: x.pid });
+        patSetStore(S.patEdit.groups);
+        flash(`${p.name} is now on the shelf.`);
+        renderAll();
+      });
+    bb("✕", "Remove from the composer (the pattern itself is kept)",
+       () => { S.pcomp.splice(i, 1); pcompStore(); renderAll(); });
+    card.append(box, meta, btns);
+    strip.append(card);
+  });
+  const add = document.createElement("button");
+  add.className = "pcAdd"; add.textContent = "＋";
+  add.title = "Add a pattern from the shelf, or create a new one";
+  add.addEventListener("click", openPcompAdd);
+  strip.append(add);
+
+  const ctr = document.createElement("div");
+  ctr.style.cssText = "display:flex;flex-direction:column;gap:3px;margin-top:14px";
+  const mkc = (txt, fn, cls) => {
+    const b = document.createElement("button");
+    b.className = "btn small" + (cls ? " " + cls : "");
+    b.textContent = txt;
+    b.addEventListener("click", fn);
+    return b;
+  };
+  ctr.append(mkc("▶ All", pcompPlayAll, "active"), mkc("■ Stop", patPreviewStop), mkc("Close", pcompClose));
+  strip.append(ctr);
+}
+
 function renderStaffNav() {
   const el = $("staffNav");
   const show = !S.patEdit;
@@ -5592,7 +5884,7 @@ function renderSaved() {
 
 function renderAll() {
   renderControls(); renderBarNav(); renderStatus();
-  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
+  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderPcomp(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
 }
 
 /* ─────────────── wiring ─────────────── */
@@ -5604,6 +5896,7 @@ function startNewComposition(mode) {
   stopPlayback(); midiPanic();
   S.bars = [[]]; S.barIdx = 0;
   S.bank = [];
+  S.pcomp = []; S.pcompDraft = null; pcompStore();
   S.loop = null; S.loopPickStart = null;
   S.colorRules = [];
   S.selectedId = null; S.selectedMidi = null; S.alignPending = null;
@@ -6105,6 +6398,7 @@ function renderMenus() {
     () => { S.patEdit ? exitPatternStudio() : enterPatternStudio(); }, { check: !!S.patEdit }));
   dp.append(mItem("Insert pattern into composition…", () => openPatInsertModal(null)));
   dp.append(mItem("Add pattern to bank…", openBankAdd));
+  dp.append(mItem("Pattern Composer", pcompOpen, { check: !!(S.patEdit && S.pcompOpen) }));
   dp.append(mSep(), mHead(`Library (${S.patterns.length})`));
   if (!S.patterns.length) {
     const d0 = document.createElement("div");
@@ -6270,7 +6564,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 33;
+const BUILD = 34;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
