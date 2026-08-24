@@ -2389,6 +2389,7 @@ function applyRhythm(idx) {
    fall through untouched, so grab/resize/scroll are unaffected. */
 /* runtime errors surface ON the page — essential for phone debugging */
 let staffPan = null;
+let marq = null;        // rubber-band selection state
 const errLog = [];
 function reportErr(msg) {
   errLog.push(String(msg).slice(0, 300));
@@ -4335,6 +4336,15 @@ function openPatInsertModal(pid) {
 /* per-box preview */
 let patPrev = null;
 const r3n = v => Math.round(v * 1000) / 1000;
+function noteCount(b) {
+  /* chords count once: notes (or bass tones) sharing the exact same start AND
+     the exact same duration merge — including ones entered as separate events */
+  const keys = new Set();
+  b.forEach(ev => {
+    if (ev.type === "note" || ev.type === "bass") keys.add(r3n(ev.start) + ":" + r3n(ev.dur));
+  });
+  return keys.size;
+}
 let pidSeq = 0;
 const newPid = () => Date.now() * 1000 + (pidSeq = (pidSeq + 1) % 1000);   // unique even within 1 ms
 function openPatInstanceModal(ev) {
@@ -4591,7 +4601,8 @@ function renderStaffNav() {
   nb("◀", "Previous bar", () => go(S.barIdx - 1), S.barIdx === 0);
   const lab = document.createElement("span");
   lab.className = "navLab";
-  lab.textContent = `Bar ${S.barIdx + 1} / ${n}`;
+  lab.textContent = `Bar ${S.barIdx + 1} / ${n} · ♪ ${noteCount(bar())}`;
+  lab.title = "Notes in this bar — tones with the exact same start and duration count as one chord";
   el.append(lab);
   nb("▶", "Next bar", () => go(S.barIdx + 1), S.barIdx >= n - 1);
   nb("⏭", "Last bar", () => go(n - 1), S.barIdx >= n - 1);
@@ -4817,7 +4828,7 @@ function gridRowSvg(startBar, cols) {
     const selMark = g.bi === S.barIdx;
     svg.append(svgEl("text", { x: g.x0 + 3, y: 10, "font-size": 8.5, "font-weight": 700,
       fill: g.exists ? T.labOct : T.labSharp },
-      `Bar ${g.bi + 1}${g.exists ? "" : " (empty — tap to create)"}`));
+      g.exists ? `Bar ${g.bi + 1} · ♪ ${noteCount(S.bars[g.bi])}` : `Bar ${g.bi + 1} (empty — tap to create)`));
     let dx = g.x0 + 3;
     S.bank.forEach(be => {
       if (be.muted || !bankAppliesTo(be, g.bi)) return;
@@ -5713,6 +5724,9 @@ function armMode(prop, keep) {
   keep = keep || [];
   /* defensive: no stale drag state can ever survive a tool change */
   drag = null; grab = null; gdrag = null; pgrab = null; staffPan = null;
+  marq = null;
+  const mbx = document.getElementById("marqBox");
+  if (mbx) mbx.remove();
   selClickSuppressUntil = 0;
   const on = !S[prop];
   MODES.forEach(k => { if (k !== prop && !keep.includes(k)) S[k] = false; });
@@ -5841,9 +5855,69 @@ $("staff").addEventListener("pointermove", e => {
 window.addEventListener("pointerup", () => { staffPan = null; });
 window.addEventListener("pointercancel", () => {
   staffPan = null;
+  marq = null;
+  const mbx = document.getElementById("marqBox");
+  if (mbx) mbx.remove();
   if (gdrag) { gdrag = null; renderAll(); }
   if (grab) { grab = null; renderAll(); }
   if (pgrab) { pgrab = null; renderAll(); }
+});
+
+/* ── rubber-band (box) selection: in ▣ Select, drag on empty staff to select
+      every note the box touches. Whole events select if any of their tones are
+      inside; under-10px presses remain ordinary taps. ── */
+function marqueeSelect(x0, y0, x1, y1) {
+  const L = Math.min(x0, x1), R = Math.max(x0, x1);
+  const Tp = Math.min(y0, y1), Bt = Math.max(y0, y1);
+  const xs = t => PAD_L + t * lastPxPerSec;
+  let added = 0;
+  bar().forEach(ev => {
+    if (ev.type !== "note" && ev.type !== "bass") return;
+    const ms = ev.type === "note" ? ev.midis : [ev.midi];
+    const ex0 = xs(ev.start), ex1 = xs(ev.start + ev.dur);
+    const hit = ms.some(m => {
+      const y = yOfMidi(m);
+      return ex1 >= L && ex0 <= R && y + 5 >= Tp && y - 5 <= Bt;
+    });
+    if (hit && !S.groupSel.has(ev.id)) { S.groupSel.add(ev.id); added++; }
+  });
+  return added;
+}
+$("staff").addEventListener("pointerdown", e => {
+  if (!S.selMode || S.playing || gdrag || grab || drag || pgrab) return;
+  if (e.target && e.target.dataset && e.target.dataset.ev !== undefined) return;  // shapes: tap/drag their own way
+  const r = $("staff").getBoundingClientRect();
+  marq = { id: e.pointerId, x0: e.clientX - r.left, y0: e.clientY - r.top, x1: 0, y1: 0, active: false };
+}, { passive: true });
+window.addEventListener("pointermove", e => {
+  if (!marq || e.pointerId !== marq.id) return;
+  if (gdrag) { marq = null; return; }
+  const r = $("staff").getBoundingClientRect();
+  marq.x1 = e.clientX - r.left; marq.y1 = e.clientY - r.top;
+  if (!marq.active && Math.hypot(marq.x1 - marq.x0, marq.y1 - marq.y0) > 10) marq.active = true;
+  if (!marq.active) return;
+  let box = document.getElementById("marqBox");
+  if (!box) {
+    box = svgEl("rect", { id: "marqBox", fill: "rgba(21,101,192,0.10)", stroke: "#1565c0",
+      "stroke-width": 1.2, "stroke-dasharray": "5 4", "pointer-events": "none" });
+    $("staff").append(box);
+  }
+  box.setAttribute("x", Math.min(marq.x0, marq.x1));
+  box.setAttribute("y", Math.min(marq.y0, marq.y1));
+  box.setAttribute("width", Math.abs(marq.x1 - marq.x0));
+  box.setAttribute("height", Math.abs(marq.y1 - marq.y0));
+});
+window.addEventListener("pointerup", e => {
+  if (!marq || e.pointerId !== marq.id) return;
+  const m2 = marq;
+  marq = null;
+  const box = document.getElementById("marqBox");
+  if (box) box.remove();
+  if (!m2.active) return;
+  const n = marqueeSelect(m2.x0, m2.y0, m2.x1, m2.y1);
+  flash(n ? `Box select: +${n} note${n === 1 ? "" : "s"} (${S.groupSel.size} selected).`
+          : "Box select: nothing new inside the box.");
+  renderAll();
 });
 
 attachTap($("staff"), e => {
@@ -6196,7 +6270,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 32;
+const BUILD = 33;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
