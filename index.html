@@ -654,6 +654,7 @@ const S = {
   pcomp: [],                       // pattern composer rack: {pid, on}
   pcompOpen: false,
   pcompDraft: null,                // {mode:"new"} | {mode:"edit", pid} | null
+  pcompOverlays: [],               // [{pid, muted}] shown behind the draft, max 7
   pcompPrevSpacing: null,
   showChips: (typeof localStorage !== "undefined" && localStorage.getItem("toneComposerV2.showChips") === "1"),
   spacing: (typeof localStorage !== "undefined" && SPACINGS_VALID(localStorage.getItem("toneComposerV2.spacing"))) || "default",
@@ -3507,6 +3508,26 @@ function renderStaff() {
       "font-size": 9.5, fill: "#999", "pointer-events": "none" }, `⌷ ${fmt(g.e - g.s)} s`));
   });
 
+  /* Pattern Composer overlays: reference patterns drawn behind the draft's own
+     notes, in their box border colour, never interactive */
+  if (S.patEdit && S.pcompDraft && S.pcompOverlays.length) {
+    S.pcompOverlays.forEach((o, oi) => {
+      const p2 = patById(o.pid);
+      if (!p2) return;
+      const col = overlayColor(o.pid, oi);
+      p2.events.forEach(pe => {
+        if (pe.type !== "note") return;
+        pe.midis.forEach(m => {
+          if (m < MIDI_MIN || m > MIDI_MAX) return;
+          svg.append(svgEl("rect", { x: X(pe.start), y: yOfMidi(m) - 4,
+            width: Math.max(pe.dur * pxPerSec - 1, 3), height: 8, rx: 2,
+            fill: col, opacity: o.muted ? 0.3 : 0.5, stroke: col, "stroke-width": 1,
+            "stroke-dasharray": "3 2", "pointer-events": "none" }));
+        });
+      });
+    });
+  }
+
   /* pattern instances: a translucent ghost band shows the extent but intercepts
      NOTHING (notes can be entered beneath it) + a compact chip that drags the
      instance and taps open to its controls */
@@ -4058,6 +4079,22 @@ function patSetStore(groups) {
 }
 const patBarCap = () => (TS_BEATS[S.patEdit.sig] || 4) * (60 / S.patEdit.tempo);
 const patGroupCap = () => patBarCap() * S.patEdit.groupLen;
+const OVERLAY_MAX = 7;
+const OVERLAY_FALLBACK = ["#1565c0", "#c62828", "#6a1b9a", "#ef6c00", "#00838f", "#2e7d32", "#ad1457"];
+function pcompBaseColor() {
+  const d = S.pcompDraft;
+  const p = d && d.mode === "edit" ? patById(d.pid) : null;
+  return (p && p.color) || PAT_DEFAULT_COLOR;
+}
+function overlayColor(pid, idx) {
+  /* the rack box's border colour if it has one, otherwise a fallback that is
+     never the colour of the pattern being edited */
+  const entry = S.pcomp.find(x => x.pid === pid);
+  if (entry && entry.border) return entry.border;
+  const base = String(pcompBaseColor()).toLowerCase();
+  const pool = OVERLAY_FALLBACK.filter(c => c.toLowerCase() !== base);
+  return pool[idx % pool.length];
+}
 function pcompNorm(x) {
   return {
     pid: x.pid,
@@ -4661,6 +4698,7 @@ function pcompClose() {
 function pcompStartDraft(mode, pid) {
   if (S.bars[0].length && mode === "new" && !confirmDraftClear()) return;
   S.pcompDraft = { mode, pid: pid || null };
+  S.pcompOverlays = [];
   S.pcompPrevSpacing = S.spacing;
   S.spacing = "large";                       // expand the staff for comfortable entry
   if (mode === "new") { S.bars = [[]]; S.barIdx = 0; }
@@ -4682,6 +4720,7 @@ function confirmDraftClear() {
 }
 function pcompEndDraft() {
   S.pcompDraft = null;
+  S.pcompOverlays = [];
   if (S.pcompPrevSpacing) { S.spacing = S.pcompPrevSpacing; S.pcompPrevSpacing = null; }
 }
 function pcompDraftEvents() {
@@ -4706,19 +4745,37 @@ function pcompOk() {
   if (!res) return;
   const mapped = res.evts.map(e => ({ type: e.type, start: r3n(e.start), dur: r3n(e.dur),
     midis: e.midis ? [...e.midis] : undefined, vel: e.vel, shape: e.shape }));
+  let baseName;
   if (d.mode === "new") {
     const pat = { pid: newPid(), name: `C${S.pcomp.length + 1}`, color: PAT_DEFAULT_COLOR,
       tempo: S.patEdit.tempo, sig: S.patEdit.sig, nbars: 1, span: res.span, events: mapped };
     S.patterns.push(pat); patStore();
     S.pcomp.push(pcompNorm({ pid: pat.pid })); pcompStore();
+    baseName = pat.name;
     flash(`${pat.name} added to the composer (${fmt(res.span)} s). It is not on the shelf yet — use ⇧ to put it there.`);
   } else {
     const p = patById(d.pid);
     if (p) {
       p.events = mapped; p.span = res.span;
       patStore();
+      baseName = p.name;
       flash(`${p.name} updated (${fmt(res.span)} s) — every instance and bank entry follows.`);
     }
+  }
+  /* with overlays attached, also lay down a composite: the edited content plus
+     every overlay, as a new unshelved pattern named <base>-o<overlays…> */
+  if (S.pcompOverlays.length && baseName) {
+    const ovs = S.pcompOverlays.map(o => patById(o.pid)).filter(Boolean);
+    const names = ovs.map(p2 => p2.name).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+    const evs = mapped.map(e => ({ ...e, midis: e.midis ? [...e.midis] : undefined }));
+    ovs.forEach(p2 => p2.events.forEach(pe => evs.push({ type: pe.type, start: r3n(pe.start), dur: r3n(pe.dur),
+      midis: pe.midis ? [...pe.midis] : undefined, vel: pe.vel, shape: pe.shape })));
+    const span = Math.max(res.span, ...ovs.map(p2 => p2.span));
+    const comp = { pid: newPid(), name: `${baseName}-o${names.join("-")}`, color: PAT_DEFAULT_COLOR,
+      tempo: S.patEdit.tempo, sig: S.patEdit.sig, nbars: 1, span: r3n(span), events: evs };
+    S.patterns.push(comp); patStore();
+    S.pcomp.push(pcompNorm({ pid: comp.pid })); pcompStore();
+    flash(`${comp.name} created — the edit plus ${ovs.length} overlay${ovs.length === 1 ? "" : "s"}, unshelved.`);
   }
   pcompEndDraft();
   S.bars = [[]]; S.barIdx = 0;
@@ -4776,6 +4833,29 @@ function pcompTickStop() {
     el.textContent = el.dataset.idle || "—";
     el.style.color = "";
   });
+}
+function pcompPreviewDraft() {
+  patPreviewStop();
+  const evts = S.bars[0].filter(e => e.type === "note");
+  const live = S.pcompOverlays.filter(o => !o.muted).map(o => patById(o.pid)).filter(Boolean);
+  if (!evts.length && !live.length) { flash("Nothing to hear yet."); return; }
+  const ctx = ensureCtx();
+  const go = () => {
+    const t0 = ctx.currentTime + 0.08;
+    evts.forEach(ev => ev.midis.forEach(m => {
+      if (m >= MIDI_MIN && m <= MIDI_MAX) scheduleTone(ctx, t0, m, ev.start, shapeDur(ev), ev.vel, ev.shape);
+    }));
+    live.forEach(p => p.events.forEach(pe => {
+      if (pe.type !== "note") return;
+      pe.midis.forEach(m => {
+        if (m >= MIDI_MIN && m <= MIDI_MAX) scheduleTone(ctx, t0, m, pe.start, shapeDur(pe), pe.vel, pe.shape);
+      });
+    }));
+    patPrev = { evId: "draft", timer: null };
+    renderStatus();
+  };
+  if (ctx.state === "suspended") { try { ctx.resume().then(go).catch(go); } catch (e) { go(); } }
+  else go();
 }
 function pcompPlayAll() {
   patPreviewStop();
@@ -4869,6 +4949,66 @@ function openPcompAdd() {
             mk("Cancel", "", closeModal));
   body.append(l1, l2);
   showModal("Add to Pattern Composer", body);
+}
+function openPcompOverlayAdd() {
+  if (!S.pcompDraft) return;
+  if (S.pcompOverlays.length >= OVERLAY_MAX) { flash(`Up to ${OVERLAY_MAX} overlays (8 layers in all).`); return; }
+  const editing = S.pcompDraft.mode === "edit" ? S.pcompDraft.pid : null;
+  const avail = S.pcomp.filter(x => x.pid !== editing && !S.pcompOverlays.some(o => o.pid === x.pid) && patById(x.pid));
+  if (!avail.length) { flash("No other patterns in the rack to overlay."); return; }
+  const body = document.createElement("div");
+  const line = document.createElement("div"); line.className = "mline";
+  const sel = document.createElement("select");
+  sel.className = "pitchSel";
+  avail.forEach(x => {
+    const p = patById(x.pid);
+    const o = document.createElement("option");
+    o.value = x.pid;
+    o.textContent = `${p.name} · ${fmt(p.span)} s`;
+    sel.append(o);
+  });
+  const add = document.createElement("button");
+  add.className = "btn active"; add.textContent = "Add overlay";
+  add.addEventListener("click", () => {
+    S.pcompOverlays.push({ pid: Number(sel.value), muted: true });   // muted by default
+    closeModal();
+    flash("Overlay added — it is muted until you unmute it (🔇).");
+    renderAll();
+  });
+  line.append(sel, add);
+  const note = document.createElement("div");
+  note.style.cssText = "font-size:12px;color:#666";
+  note.textContent = "Overlays are shown for reference and can be auditioned; their own notes are not edited here.";
+  body.append(line, note);
+  showModal(`Add overlay (${S.pcompOverlays.length}/${OVERLAY_MAX})`, body);
+}
+function openPcompRename(i) {
+  const x = S.pcomp[i];
+  const p = x && patById(x.pid);
+  if (!p) return;
+  const body = document.createElement("div");
+  const line = document.createElement("div"); line.className = "mline";
+  const inp = document.createElement("input");
+  inp.type = "text"; inp.value = p.name; inp.maxLength = 24; inp.style.width = "150px";
+  const ok = document.createElement("button");
+  ok.className = "btn active"; ok.textContent = "Rename";
+  const apply = () => {
+    const v = String(inp.value).trim();
+    if (!v) { flash("The name cannot be empty."); return; }
+    p.name = v; patStore();
+    closeModal(); flash(`Renamed to ${v}.`); renderAll();
+  };
+  ok.addEventListener("click", apply);
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") apply(); });
+  const cancel = document.createElement("button");
+  cancel.className = "btn"; cancel.textContent = "Cancel";
+  cancel.addEventListener("click", closeModal);
+  line.append(inp, ok, cancel);
+  const note = document.createElement("div");
+  note.style.cssText = "font-size:12px;color:#666";
+  note.textContent = `${fmt(p.span)} s · the name changes everywhere this pattern is used.`;
+  body.append(line, note);
+  showModal("Rename pattern", body);
 }
 function openPcompColor(i) {
   const x = S.pcomp[i];
@@ -4965,6 +5105,41 @@ function renderPcomp() {
     ca.className = "btn"; ca.textContent = "Cancel";
     ca.addEventListener("click", pcompCancel);
     barEl.append(msg, ok, ca);
+    const ovAdd = document.createElement("button");
+    ovAdd.className = "btn small";
+    ovAdd.textContent = `＋ Overlay (${S.pcompOverlays.length}/${OVERLAY_MAX})`;
+    ovAdd.title = "Show another pattern behind this one for reference";
+    ovAdd.addEventListener("click", openPcompOverlayAdd);
+    barEl.append(ovAdd);
+    S.pcompOverlays.forEach((o, oi) => {
+      const p2 = patById(o.pid);
+      if (!p2) return;
+      const chip = document.createElement("span");
+      chip.style.cssText = "display:inline-flex;align-items:center;gap:3px;border:2px solid " +
+        overlayColor(o.pid, oi) + ";border-radius:5px;padding:1px 4px;font-size:11px;font-weight:700";
+      const nm = document.createElement("span");
+      nm.textContent = p2.name;
+      nm.style.color = overlayColor(o.pid, oi);
+      const mb = document.createElement("button");
+      mb.className = "btn small" + (o.muted ? "" : " active");
+      mb.textContent = o.muted ? "🔇" : "🔊";
+      mb.title = o.muted ? "Muted — tap to hear it in previews" : "Audible in previews";
+      mb.addEventListener("click", () => { o.muted = !o.muted; renderAll(); });
+      const rm = document.createElement("button");
+      rm.className = "btn small"; rm.textContent = "✕"; rm.title = "Remove this overlay";
+      rm.addEventListener("click", () => { S.pcompOverlays.splice(oi, 1); renderAll(); });
+      chip.append(nm, mb, rm);
+      barEl.append(chip);
+    });
+    const prev = document.createElement("button");
+    prev.className = "btn small";
+    prev.textContent = "▶ Draft";
+    prev.title = "Hear what you have entered, with any unmuted overlays";
+    prev.addEventListener("click", pcompPreviewDraft);
+    const stp = document.createElement("button");
+    stp.className = "btn small"; stp.textContent = "■";
+    stp.addEventListener("click", patPreviewStop);
+    barEl.append(prev, stp);
     return;
   }
 
@@ -4983,7 +5158,9 @@ function renderPcomp() {
     box.style.background = p.color;
     box.style.color = isLight(p.color) ? "#000" : "#fff";
     box.textContent = p.name;
-    box.title = `${p.name} · ${fmt(p.span)} s${pcompOnShelf(x.pid) ? " · on the shelf" : " · composer only"}`;
+    box.title = `${p.name} · ${fmt(p.span)} s${pcompOnShelf(x.pid) ? " · on the shelf" : " · composer only"} — tap to rename`;
+    box.style.cursor = "pointer";
+    box.addEventListener("click", () => openPcompRename(i));
     const meta = document.createElement("div");
     meta.className = "pcMeta";
     const anch = x.anchor != null ? patById(x.anchor) : null;
@@ -6759,7 +6936,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 36;
+const BUILD = 37;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
