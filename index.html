@@ -3515,14 +3515,21 @@ function renderStaff() {
       const p2 = patById(o.pid);
       if (!p2) return;
       const col = overlayColor(o.pid, oi);
-      p2.events.forEach(pe => {
-        if (pe.type !== "note") return;
-        pe.midis.forEach(m => {
-          if (m < MIDI_MIN || m > MIDI_MAX) return;
-          svg.append(svgEl("rect", { x: X(pe.start), y: yOfMidi(m) - 4,
-            width: Math.max(pe.dur * pxPerSec - 1, 3), height: 8, rx: 2,
-            fill: col, opacity: o.muted ? 0.3 : 0.5, stroke: col, "stroke-width": 1,
-            "stroke-dasharray": "3 2", "pointer-events": "none" }));
+      const draftLen = Math.max(barLen(S.bars[0]), p2.span);
+      overlayPlacements(o, draftLen).forEach(t0off => {
+        p2.events.forEach(pe => {
+          if (pe.type !== "note") return;
+          const t = t0off + pe.start;
+          if (t + pe.dur <= 0) return;                 // entirely before the draft begins
+          const tv = Math.max(0, t);
+          const dv = pe.dur - (tv - t);
+          pe.midis.forEach(m => {
+            if (m < MIDI_MIN || m > MIDI_MAX) return;
+            svg.append(svgEl("rect", { x: X(tv), y: yOfMidi(m) - 4,
+              width: Math.max(dv * pxPerSec - 1, 3), height: 8, rx: 2,
+              fill: col, opacity: o.muted ? 0.3 : 0.5, stroke: col, "stroke-width": 1,
+              "stroke-dasharray": "3 2", "pointer-events": "none" }));
+          });
         });
       });
     });
@@ -4094,6 +4101,27 @@ function overlayColor(pid, idx) {
   const base = String(pcompBaseColor()).toLowerCase();
   const pool = OVERLAY_FALLBACK.filter(c => c.toLowerCase() !== base);
   return pool[idx % pool.length];
+}
+function overlayDelta(pid) {
+  /* where the overlay begins RELATIVE to the pattern being edited, using the
+     rack's own timing (anchor + offset) rather than the pattern's internal 0 */
+  const d = S.pcompDraft;
+  const { starts } = pcompResolveStarts();
+  const base = d && d.mode === "edit" && starts.has(d.pid) ? starts.get(d.pid) : 0;
+  return r3n((starts.get(pid) || 0) - base);
+}
+function overlayPlacements(o, draftLen) {
+  /* cycle start times for one overlay across the draft window, honouring its
+     loop mode: N× gives exactly N cycles, ∞ repeats to cover the draft */
+  const p = patById(o.pid);
+  if (!p || !(p.span > 0)) return [];
+  const entry = S.pcomp.find(x => x.pid === o.pid);
+  const d = overlayDelta(o.pid);
+  const need = Math.max(1, Math.ceil((Math.max(draftLen, 0.001) - d) / p.span));
+  const n = Math.min(entry && entry.mode === "n" ? entry.count : need, 200);
+  const out = [];
+  for (let k = 0; k < n; k++) out.push(r3n(d + k * p.span));
+  return out;
 }
 function pcompNorm(x) {
   return {
@@ -4768,9 +4796,19 @@ function pcompOk() {
     const ovs = S.pcompOverlays.map(o => patById(o.pid)).filter(Boolean);
     const names = ovs.map(p2 => p2.name).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
     const evs = mapped.map(e => ({ ...e, midis: e.midis ? [...e.midis] : undefined }));
-    ovs.forEach(p2 => p2.events.forEach(pe => evs.push({ type: pe.type, start: r3n(pe.start), dur: r3n(pe.dur),
-      midis: pe.midis ? [...pe.midis] : undefined, vel: pe.vel, shape: pe.shape })));
-    const span = Math.max(res.span, ...ovs.map(p2 => p2.span));
+    let far = res.span;
+    S.pcompOverlays.forEach(o => {
+      const p2 = patById(o.pid);
+      if (!p2) return;
+      overlayPlacements(o, res.span).forEach(t0off => p2.events.forEach(pe => {
+        const t = r3n(t0off + pe.start);
+        if (t < 0) return;                              // clipped: the composite starts at 0
+        evs.push({ type: pe.type, start: t, dur: r3n(pe.dur),
+          midis: pe.midis ? [...pe.midis] : undefined, vel: pe.vel, shape: pe.shape });
+        far = Math.max(far, r3n(t + pe.dur));
+      }));
+    });
+    const span = far;
     const comp = { pid: newPid(), name: `${baseName}-o${names.join("-")}`, color: PAT_DEFAULT_COLOR,
       tempo: S.patEdit.tempo, sig: S.patEdit.sig, nbars: 1, span: r3n(span), events: evs };
     S.patterns.push(comp); patStore();
@@ -4837,7 +4875,7 @@ function pcompTickStop() {
 function pcompPreviewDraft() {
   patPreviewStop();
   const evts = S.bars[0].filter(e => e.type === "note");
-  const live = S.pcompOverlays.filter(o => !o.muted).map(o => patById(o.pid)).filter(Boolean);
+  const live = S.pcompOverlays.filter(o => !o.muted && patById(o.pid));
   if (!evts.length && !live.length) { flash("Nothing to hear yet."); return; }
   const ctx = ensureCtx();
   const go = () => {
@@ -4845,12 +4883,18 @@ function pcompPreviewDraft() {
     evts.forEach(ev => ev.midis.forEach(m => {
       if (m >= MIDI_MIN && m <= MIDI_MAX) scheduleTone(ctx, t0, m, ev.start, shapeDur(ev), ev.vel, ev.shape);
     }));
-    live.forEach(p => p.events.forEach(pe => {
-      if (pe.type !== "note") return;
-      pe.midis.forEach(m => {
-        if (m >= MIDI_MIN && m <= MIDI_MAX) scheduleTone(ctx, t0, m, pe.start, shapeDur(pe), pe.vel, pe.shape);
-      });
-    }));
+    const draftLen = Math.max(barLen(S.bars[0]), 0.001);
+    live.forEach(o => {
+      const p = patById(o.pid);
+      overlayPlacements(o, draftLen).forEach(t0off => p.events.forEach(pe => {
+        if (pe.type !== "note") return;
+        const t = t0off + pe.start;
+        if (t < 0) return;                              // before the draft starts: not heard
+        pe.midis.forEach(m => {
+          if (m >= MIDI_MIN && m <= MIDI_MAX) scheduleTone(ctx, t0, m, t, shapeDur(pe), pe.vel, pe.shape);
+        });
+      }));
+    });
     patPrev = { evId: "draft", timer: null };
     renderStatus();
   };
@@ -5118,7 +5162,9 @@ function renderPcomp() {
       chip.style.cssText = "display:inline-flex;align-items:center;gap:3px;border:2px solid " +
         overlayColor(o.pid, oi) + ";border-radius:5px;padding:1px 4px;font-size:11px;font-weight:700";
       const nm = document.createElement("span");
-      nm.textContent = p2.name;
+      const dl = overlayDelta(o.pid);
+      nm.textContent = `${p2.name} ${dl === 0 ? "@start" : (dl > 0 ? "+" : "") + fmt(dl) + "s"}`;
+      nm.title = "Set with the ⏱ button on the pattern's rack box";
       nm.style.color = overlayColor(o.pid, oi);
       const mb = document.createElement("button");
       mb.className = "btn small" + (o.muted ? "" : " active");
@@ -6936,7 +6982,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 37;
+const BUILD = 38;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
