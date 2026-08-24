@@ -1884,7 +1884,7 @@ function restoreExtras(d) {
           muted: !!b.muted }))
     : [];
   S.pcomp = Array.isArray(d.pcomp)
-    ? d.pcomp.filter(x => x && x.pid != null).map(x => ({ pid: x.pid, on: x.on !== false }))
+    ? d.pcomp.filter(x => x && x.pid != null).map(pcompNorm)
     : [];
   S.colorRules = Array.isArray(d.colorRules)
     ? d.colorRules.filter(r => r && Number.isInteger(r.lo) && Number.isInteger(r.hi) &&
@@ -4052,13 +4052,23 @@ function patSetStore(groups) {
 }
 const patBarCap = () => (TS_BEATS[S.patEdit.sig] || 4) * (60 / S.patEdit.tempo);
 const patGroupCap = () => patBarCap() * S.patEdit.groupLen;
+function pcompNorm(x) {
+  return {
+    pid: x.pid,
+    on: x.on !== false,
+    mode: x.mode === "n" ? "n" : "inf",          // infinite by default
+    count: Math.max(1, Math.min(64, parseInt(x.count, 10) || 8)),
+    anchor: x.anchor == null ? null : x.anchor,  // pid this one starts with
+    offset: Number.isFinite(+x.offset) ? r3n(+x.offset) : 0,
+  };
+}
 function pcompStore() {
   try { localStorage.setItem("toneComposerV2.pcomp", JSON.stringify(S.pcomp)); } catch (e) {}
 }
 function pcompLoad() {
   try {
     const v = JSON.parse(localStorage.getItem("toneComposerV2.pcomp") || "[]");
-    S.pcomp = Array.isArray(v) ? v.filter(x => x && patById(x.pid)).map(x => ({ pid: x.pid, on: x.on !== false })) : [];
+    S.pcomp = Array.isArray(v) ? v.filter(x => x && patById(x.pid)).map(pcompNorm) : [];
   } catch (e) { S.pcomp = []; }
 }
 function pcompOnShelf(pid) {
@@ -4484,6 +4494,7 @@ function openPatInstanceModal(ev) {
 }
 
 function patPreviewStop() {
+  pcompTickStop();
   if (!patPrev) return;
   clearInterval(patPrev.timer);
   playNodes.forEach(n => { try { n.stop(); } catch (e) {} });
@@ -4692,7 +4703,7 @@ function pcompOk() {
     const pat = { pid: newPid(), name: `C${S.pcomp.length + 1}`, color: PAT_DEFAULT_COLOR,
       tempo: S.patEdit.tempo, sig: S.patEdit.sig, nbars: 1, span: res.span, events: mapped };
     S.patterns.push(pat); patStore();
-    S.pcomp.push({ pid: pat.pid, on: true }); pcompStore();
+    S.pcomp.push(pcompNorm({ pid: pat.pid })); pcompStore();
     flash(`${pat.name} added to the composer (${fmt(res.span)} s). It is not on the shelf yet — use ⇧ to put it there.`);
   } else {
     const p = patById(d.pid);
@@ -4712,37 +4723,104 @@ function pcompCancel() {
   flash("Cancelled.");
   renderAll();
 }
+function pcompResolveStarts() {
+  /* start time of each rack entry: 0, or another pattern's start + offset.
+     Cycles are impossible to satisfy, so they resolve to 0 and are reported. */
+  const byPid = new Map();
+  S.pcomp.forEach(x => byPid.set(x.pid, x));
+  const starts = new Map(), state = new Map(), bad = [];
+  const resolve = pid => {
+    if (starts.has(pid)) return starts.get(pid);
+    if (state.get(pid) === 1) { bad.push(pid); starts.set(pid, 0); return 0; }
+    state.set(pid, 1);
+    const x = byPid.get(pid);
+    let t = 0;
+    if (x && x.anchor != null && byPid.has(x.anchor) && x.anchor !== pid)
+      t = resolve(x.anchor) + (x.offset || 0);
+    else if (x) t = x.offset || 0;
+    t = Math.max(0, r3n(t));
+    state.set(pid, 2);
+    starts.set(pid, t);
+    return t;
+  };
+  S.pcomp.forEach(x => resolve(x.pid));
+  /* a pattern caught in a cycle cannot have a start derived from itself:
+     pin it to 0, which is also the value the chain below it already used */
+  bad.forEach(pid => starts.set(pid, 0));
+  return { starts, bad };
+}
+function pcompWouldCycle(pid, anchorPid) {
+  /* walking up from the proposed anchor must never arrive back at pid */
+  const byPid = new Map();
+  S.pcomp.forEach(x => byPid.set(x.pid, x));
+  let cur = anchorPid, hops = 0;
+  while (cur != null && hops++ < 100) {
+    if (cur === pid) return true;
+    const x = byPid.get(cur);
+    cur = x ? x.anchor : null;
+  }
+  return false;
+}
+let pcompClock = null;      // {t0, ctx} while the rack is playing
+function pcompTickStop() {
+  if (pcompClock && pcompClock.timer) clearInterval(pcompClock.timer);
+  pcompClock = null;
+  document.querySelectorAll(".pcWatch").forEach(el => {
+    el.textContent = el.dataset.idle || "—";
+    el.style.color = "";
+  });
+}
 function pcompPlayAll() {
   patPreviewStop();
   if (S.playing) stopPlayback();
   const live = S.pcomp.filter(x => x.on && patById(x.pid) && patById(x.pid).span > 0);
   if (!live.length) { flash("No patterns are switched on."); return; }
-  const longest = Math.max(...live.map(x => patById(x.pid).span));
+  const { starts, bad } = pcompResolveStarts();
+  if (bad.length) flash("Circular start references were ignored (those patterns begin at 0.000 s).");
   const ctx = ensureCtx();
   const doPlay = () => {
     const t0 = ctx.currentTime + 0.1;
-    const state = { next: 0 };
+    const tracks = live.map(x => ({ x, p: patById(x.pid), next: starts.get(x.pid) || 0, done: 0 }));
+    const anyInfinite = tracks.some(t => t.x.mode !== "n");
     const pump = () => {
-      /* every enabled pattern starts together at each cycle boundary and
-         short ones repeat to fill the longest one's span */
-      while (state.next < ctx.currentTime - t0 + 2.5) {
-        live.forEach(x => {
-          const p = patById(x.pid);
-          for (let off = 0; off < longest - 0.0005; off += p.span) {
-            p.events.forEach(pe => {
-              if (pe.type !== "note") return;
-              pe.midis.forEach(m => {
-                if (m >= MIDI_MIN && m <= MIDI_MAX)
-                  scheduleTone(ctx, t0, m, state.next + off + pe.start, shapeDur(pe), pe.vel, pe.shape);
-              });
+      const horizon = ctx.currentTime - t0 + 2.5;
+      tracks.forEach(t => {
+        const limit = t.x.mode === "n" ? t.x.count : Infinity;
+        while (t.next < horizon && t.done < limit) {
+          t.p.events.forEach(pe => {
+            if (pe.type !== "note") return;
+            pe.midis.forEach(m => {
+              if (m >= MIDI_MIN && m <= MIDI_MAX)
+                scheduleTone(ctx, t0, m, t.next + pe.start, shapeDur(pe), pe.vel, pe.shape);
             });
-          }
-        });
-        state.next += longest;
+          });
+          t.next = r3n(t.next + t.p.span);
+          t.done++;
+        }
+      });
+      if (!anyInfinite) {
+        const end = Math.max(...tracks.map(t => t.next));
+        if (ctx.currentTime - t0 > end + 0.1) { patPreviewStop(); return; }
       }
     };
     patPrev = { evId: "pcomp", timer: setInterval(pump, 200) };
     pump();
+    /* stopwatches: one light timer updates the text nodes directly */
+    pcompClock = { t0, ctx, starts, timer: setInterval(() => {
+      const now = ctx.currentTime - t0;
+      document.querySelectorAll(".pcWatch").forEach(el => {
+        const pid = Number(el.dataset.pid);
+        const st = starts.get(pid) || 0;
+        const p = patById(pid);
+        if (now < st) { el.textContent = `waits ${fmt(st - now)}`; el.style.color = "#888"; return; }
+        const el2 = now - st;
+        const cyc = p && p.span > 0 ? Math.floor(el2 / p.span) + 1 : 1;
+        el.textContent = `▶ ${fmt(el2)} · c${cyc}`;
+        el.style.color = "#1b5e20";
+      });
+      const master = document.getElementById("pcompMaster");
+      if (master) master.textContent = `⏱ ${fmt(Math.max(0, now))}`;
+    }, 60) };
     renderStatus();
   };
   if (ctx.state === "suspended") { try { ctx.resume().then(doPlay).catch(doPlay); } catch (e) { doPlay(); } }
@@ -4770,7 +4848,7 @@ function openPcompAdd() {
     l1.append(sel, mk("Add to composer", "active", () => {
       const pid = Number(sel.value);
       if (S.pcomp.some(x => x.pid === pid)) { flash("That pattern is already in the composer."); return; }
-      S.pcomp.push({ pid, on: true }); pcompStore();
+      S.pcomp.push(pcompNorm({ pid })); pcompStore();
       closeModal(); renderAll();
     }));
   } else {
@@ -4784,6 +4862,49 @@ function openPcompAdd() {
             mk("Cancel", "", closeModal));
   body.append(l1, l2);
   showModal("Add to Pattern Composer", body);
+}
+function openPcompTiming(i) {
+  const x = S.pcomp[i];
+  if (!x) return;
+  const p = patById(x.pid);
+  const body = document.createElement("div");
+  const mk = (txt, on, fn) => {
+    const b = document.createElement("button");
+    b.className = "btn small" + (on ? " active" : "");
+    b.textContent = txt;
+    b.addEventListener("click", fn);
+    return b;
+  };
+  const reopen = () => { pcompStore(); renderAll(); closeModal(); openPcompTiming(i); };
+  const l1 = document.createElement("div"); l1.className = "mline";
+  l1.append(mk("At the start", x.anchor == null, () => { x.anchor = null; reopen(); }));
+  S.pcomp.forEach(y => {
+    if (y.pid === x.pid) return;
+    const q = patById(y.pid);
+    if (!q) return;
+    l1.append(mk(`with ${q.name}`, x.anchor === y.pid, () => {
+      if (pcompWouldCycle(x.pid, y.pid)) {
+        flash(`${q.name} already starts (directly or indirectly) with ${p.name} — that would be circular.`);
+        return;
+      }
+      x.anchor = y.pid; reopen();
+    }));
+  });
+  const l2 = document.createElement("div"); l2.className = "mline";
+  const off = document.createElement("input");
+  off.type = "text"; off.inputMode = "decimal"; off.value = fmt(x.offset || 0); off.style.width = "76px";
+  l2.append(document.createTextNode("plus "), off, document.createTextNode(" s"),
+    mk("Apply", false, () => {
+      const v = parseFloat(String(off.value).replace(",", "."));
+      if (!Number.isFinite(v) || v < 0) { flash("Offset must be a number ≥ 0."); return; }
+      x.offset = r3n(v); reopen();
+    }));
+  const info = document.createElement("div");
+  info.style.cssText = "font-size:12px";
+  const { starts } = pcompResolveStarts();
+  info.textContent = `Starts at ${fmt(starts.get(x.pid) || 0)} s into the rack.`;
+  body.append(l1, l2, info);
+  showModal(`${p ? p.name : "Pattern"} — start time`, body);
 }
 function renderPcomp() {
   const strip = $("pcompStrip"), barEl = $("pcompBar");
@@ -4827,7 +4948,16 @@ function renderPcomp() {
     box.title = `${p.name} · ${fmt(p.span)} s${pcompOnShelf(x.pid) ? " · on the shelf" : " · composer only"}`;
     const meta = document.createElement("div");
     meta.className = "pcMeta";
-    meta.textContent = `${fmt(p.span)} s${pcompOnShelf(x.pid) ? "" : " · local"}`;
+    const anch = x.anchor != null ? patById(x.anchor) : null;
+    const whenTxt = anch ? `@${anch.name}${x.offset ? (x.offset > 0 ? "+" : "") + fmt(x.offset) : ""}`
+                         : `@${fmt(x.offset || 0)}s`;
+    meta.textContent = `${fmt(p.span)} s · ${whenTxt} · ${x.mode === "n" ? x.count + "×" : "∞"}${pcompOnShelf(x.pid) ? "" : " · local"}`;
+    const watch = document.createElement("div");
+    watch.className = "pcMeta pcWatch";
+    watch.dataset.pid = String(x.pid);
+    watch.dataset.idle = "—";
+    watch.style.fontVariantNumeric = "tabular-nums";
+    watch.textContent = "—";
     const btns = document.createElement("div");
     btns.className = "pcBtns";
     const bb = (txt, title2, fn, on) => {
@@ -4852,7 +4982,22 @@ function renderPcomp() {
       });
     bb("✕", "Remove from the composer (the pattern itself is kept)",
        () => { S.pcomp.splice(i, 1); pcompStore(); renderAll(); });
-    card.append(box, meta, btns);
+    const btns2 = document.createElement("div");
+    btns2.className = "pcBtns";
+    const bb2 = (txt, title2, fn, on) => {
+      const b = document.createElement("button");
+      b.className = "btn small" + (on ? " active" : "");
+      b.textContent = txt; b.title = title2;
+      b.addEventListener("click", fn);
+      btns2.append(b);
+    };
+    bb2("∞", "Loop forever (default)", () => { x.mode = "inf"; pcompStore(); renderAll(); }, x.mode !== "n");
+    bb2(`${x.count}×`, "Play a set number of times, then stop — tap to switch to it",
+        () => { x.mode = "n"; pcompStore(); renderAll(); }, x.mode === "n");
+    bb2("−", "Fewer repeats", () => { x.count = Math.max(1, x.count - 1); x.mode = "n"; pcompStore(); renderAll(); });
+    bb2("+", "More repeats", () => { x.count = Math.min(64, x.count + 1); x.mode = "n"; pcompStore(); renderAll(); });
+    bb2("⏱", "When this pattern starts", () => openPcompTiming(i));
+    card.append(box, meta, watch, btns, btns2);
     strip.append(card);
   });
   const add = document.createElement("button");
@@ -4870,7 +5015,12 @@ function renderPcomp() {
     b.addEventListener("click", fn);
     return b;
   };
-  ctr.append(mkc("▶ All", pcompPlayAll, "active"), mkc("■ Stop", patPreviewStop), mkc("Close", pcompClose));
+  const master = document.createElement("div");
+  master.id = "pcompMaster";
+  master.className = "pcMeta";
+  master.style.cssText = "font-weight:700;font-variant-numeric:tabular-nums;text-align:center";
+  master.textContent = "⏱ 0.000";
+  ctr.append(mkc("▶ All", pcompPlayAll, "active"), mkc("■ Stop", patPreviewStop), master, mkc("Close", pcompClose));
   strip.append(ctr);
 }
 
@@ -6564,7 +6714,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 34;
+const BUILD = 35;
 /* init */
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
