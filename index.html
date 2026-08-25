@@ -1061,20 +1061,42 @@ let latch = null;
 function stopLatch() {}
 
 /* ─────────────── chords ─────────────── */
+function coincidentTwin(anchor, midi) {
+  /* an existing separate event forming a chord with the anchor at this pitch */
+  return bar().find(e => e !== anchor && e.type === "note" &&
+    Math.abs(e.start - anchor.start) < 0.0005 && Math.abs(e.dur - anchor.dur) < 0.0005 &&
+    e.midis.length === 1 && e.midis[0] === midi) || null;
+}
 function chordAdd(ev, midi) {
   if (ev.type !== "note") { flash("Chord tones stack on melody notes only."); return; }
   const i = ev.midis.indexOf(midi);
-  if (i >= 0) {
-    if (ev.midis.length === 1) { flash("Last tone — use Delete to remove the whole event."); return; }
+  if (i >= 0 && ev.midis.length > 1) {
+    /* legacy multi-tone event: keep the old in-place removal */
     ev.midis.splice(i, 1);
     pushUndo({ kind: "addToneRemoved", id: ev.id, midi });
     flash(`Removed ${midiName(midi)} from the chord.`);
-  } else {
-    if (ev.midis.length >= MAX_TONES) { flash(`Max ${MAX_TONES} tones per chord.`); return; }
-    ev.midis.push(midi);
-    pushUndo({ kind: "addTone", id: ev.id, midi });
-    previewTone(midi);
+    renderAll();
+    return;
   }
+  if (i >= 0) { flash(`${dName(midi)} is the note itself — chord tones go above or below it.`); return; }
+  const twin = coincidentTwin(ev, midi);
+  if (twin) {
+    /* tapping an existing chord tone removes it — only that tone */
+    const bi = S.barIdx;
+    S.bars[bi] = S.bars[bi].filter(e => e !== twin);
+    pushUndo({ kind: "delgroup", items: [{ barIdx: bi, ev: twin }] });
+    flash(`Removed ${dName(midi)} from the chord — the other tones are untouched.`);
+    renderAll();
+    return;
+  }
+  /* NEW: the chord tone is its OWN event, coinciding with the anchor — it can
+     be selected, resized, reshaped, or deleted without touching the others */
+  const ne = { id: idCounter++, type: "note", midis: [midi], start: ev.start, dur: ev.dur };
+  if (ev.shape) ne.shape = ev.shape;
+  S.bars[S.barIdx].push(ne);
+  pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ne.id });
+  previewTone(midi);
+  flash(`${dName(midi)} joins the chord (${fmt(ev.dur)} s) as an independent tone — select just it to edit it alone.`);
   renderAll();
 }
 
@@ -3196,6 +3218,24 @@ function penInsert(clickX, clickY) {
   let snapped = false;
   if (!bar().length) { t = 0; snapped = t !== 0 ? snapped : snapped; }
   if (!S.penAnywhere) {
+    /* a click above, below, or on an existing note WITHIN its duration is a
+       chord: the new tone takes that note's exact start and duration */
+    const host = bar().filter(e => e.type === "note" && t >= e.start - 1e-9 && t < evEnd(e) - 1e-9)
+      .sort((a, b) => b.start - a.start)[0];
+    if (host) {
+      if (host.midis.includes(midi) || coincidentTwin(host, midi)) {
+        flash(`${dName(midi)} is already in that chord.`);
+        return;
+      }
+      const ce = { id: idCounter++, type: "note", midis: [midi], start: host.start, dur: host.dur };
+      if (host.shape) ce.shape = host.shape;
+      S.bars[S.barIdx].push(ce);
+      pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ce.id });
+      previewTone(midi, Math.min(host.dur, 1));
+      flash(`${dName(midi)} added as a chord with ${dName(host.midis[0])} (${fmt(host.dur)} s) — independent tone.`);
+      renderAll();
+      return;
+    }
     /* no-gap placement: the entry begins where the preceding sound stops —
        the latest end among events starting at/before the click (0 if none) */
     let prevEnd = 0;
@@ -7268,7 +7308,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 41;
+const BUILD = 42;
 /* init */
 viewRangeInit();
 hzoomInit();
