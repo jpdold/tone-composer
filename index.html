@@ -601,6 +601,17 @@ const SPACINGS_VALID = v => (v === "medium" || v === "large" || v === "default")
 let STEP = STEP_BASE;
 const VIEW_DEF_LO = 48, VIEW_DEF_HI = 74;               // C3–D5 default window
 let VIEW_LO = VIEW_DEF_LO, VIEW_HI = VIEW_DEF_HI;
+let HZOOM = 1;                                    // 1 = original appearance; 0.5, 0.25, 0.125 = shrunk
+function hzoomInit() {
+  try {
+    const v = parseFloat(localStorage.getItem("toneComposerV2.hzoom"));
+    if ([1, 0.5, 0.25, 0.125].includes(v)) HZOOM = v;
+  } catch (e) {}
+}
+function setHzoom(v) {
+  HZOOM = v;
+  try { localStorage.setItem("toneComposerV2.hzoom", String(v)); } catch (e) {}
+}
 function viewRangeInit() {
   try {
     const lo = parseInt(localStorage.getItem("toneComposerV2.viewLo"), 10);
@@ -3258,9 +3269,13 @@ function renderStaff() {
   const targetW = Math.max(BASE_W, (frame && frame.clientWidth ? frame.clientWidth : 0) - 4);
   const fitPx = (targetW - PAD_L - PAD_R) / Math.max(totalDur, 2);
   const needPx = minDur === Infinity ? 0 : MIN_EV_PX / minDur;
-  const pxPerSec = drag ? drag.pxPerSec : grab ? grab.pxPerSec : gdrag ? gdrag.px : Math.min(Math.max(fitPx, needPx), 400);
+  const pxPerSec = drag ? drag.pxPerSec : grab ? grab.pxPerSec : gdrag ? gdrag.px
+    : Math.min(Math.max(fitPx, needPx), 400) * HZOOM;
   lastPxPerSec = pxPerSec;
-  const svgW = Math.max(targetW, PAD_L + PAD_R + totalDur * pxPerSec + 20);
+  /* entry runway: generous empty, clickable staff beyond the content so there
+     is always ample room to place the next notes (scrolls; swipe or drag) */
+  const runwaySec = Math.max(6, totalDur * 0.75);
+  const svgW = Math.max(targetW, PAD_L + PAD_R + (totalDur + runwaySec) * pxPerSec + 20);
   const X = t => PAD_L + t * pxPerSec;
 
   svg.setAttribute("width", svgW);
@@ -3296,7 +3311,7 @@ function renderStaff() {
   }
 
   /* Pattern Studio: heavy double lines at every internal bar boundary + the group end */
-  if (S.patEdit) {
+  if (S.patEdit && SHOW_BAR_SEPARATORS) {
     const bcap = patBarCap();
     for (let k = 1; k <= S.patEdit.groupLen; k++) {
       const bt = k * bcap;
@@ -3310,7 +3325,7 @@ function renderStaff() {
   }
 
   /* tonal beat grid: beat + eighth gridlines, bold bar-capacity marker */
-  if (S.notation === "tonal") {
+  if (S.notation === "tonal" && SHOW_BAR_SEPARATORS) {
     const qs = 60 / S.tonal.tempo;
     const beats = TS_BEATS[S.tonal.sig] || 4;
     const cap = beats * qs;
@@ -4114,6 +4129,7 @@ function patSetStore(groups) {
 }
 const patBarCap = () => (TS_BEATS[S.patEdit.sig] || 4) * (60 / S.patEdit.tempo);
 const patGroupCap = () => patBarCap() * S.patEdit.groupLen;
+const SHOW_BAR_SEPARATORS = false;   // vertical bar/beat separators parked for now, per request
 const OVERLAY_MAX = 7;
 const OVERLAY_FALLBACK = ["#1565c0", "#c62828", "#6a1b9a", "#ef6c00", "#00838f", "#2e7d32", "#ad1457"];
 function pcompBaseColor() {
@@ -5345,6 +5361,21 @@ function renderStaffNav() {
   nb("▶", "Next bar", () => go(S.barIdx + 1), S.barIdx >= n - 1);
   nb("⏭", "Last bar", () => go(n - 1), S.barIdx >= n - 1);
   nb("⏭ End bar here", "Finish this bar at its current length and move to a fresh bar", endBar);
+  const sep = document.createElement("span");
+  sep.style.cssText = "width:8px";
+  el.append(sep);
+  nb("◧ Shrink", "Halve how long the notes LOOK — durations are unchanged",
+     () => { setHzoom(Math.max(0.125, HZOOM / 2)); renderAll(); }, HZOOM <= 0.125);
+  nb("◨ Unshrink", "Double the appearance back toward the original",
+     () => { setHzoom(Math.min(1, HZOOM * 2)); renderAll(); }, HZOOM >= 1);
+  if (HZOOM < 1) {
+    const zl = document.createElement("span");
+    zl.className = "navLab";
+    zl.style.minWidth = "38px";
+    zl.textContent = `×${HZOOM}`;
+    zl.title = "Appearance scale — durations are unchanged";
+    el.append(zl);
+  }
 }
 function renderBank() {
   const el = $("bankStrip");
@@ -5556,12 +5587,14 @@ function gridRowSvg(startBar, cols) {
     if (g.exists) drawMiniEvents(svg, S.bars[g.bi], local, MY, nh, PTm, PBm, H);
 
     /* barline at the segment's right edge; composition's final bar gets a double */
-    const isFinal = g.bi === S.bars.length - 1;
-    svg.append(svgEl("line", { x1: g.x1, x2: g.x1, y1: PTm - 4, y2: H - PBm + 4,
-      stroke: T.lineOct, "stroke-width": 1.5 }));
-    if (isFinal)
-      svg.append(svgEl("line", { x1: g.x1 - 3, x2: g.x1 - 3, y1: PTm - 4, y2: H - PBm + 4,
-        stroke: T.lineOct, "stroke-width": 0.8 }));
+    if (SHOW_BAR_SEPARATORS) {
+      const isFinal = g.bi === S.bars.length - 1;
+      svg.append(svgEl("line", { x1: g.x1, x2: g.x1, y1: PTm - 4, y2: H - PBm + 4,
+        stroke: T.lineOct, "stroke-width": 1.5 }));
+      if (isFinal)
+        svg.append(svgEl("line", { x1: g.x1 - 3, x2: g.x1 - 3, y1: PTm - 4, y2: H - PBm + 4,
+          stroke: T.lineOct, "stroke-width": 0.8 }));
+    }
 
     /* header: bar number (+ state), bank dots, ✎ */
     const selMark = g.bi === S.barIdx;
@@ -6622,9 +6655,11 @@ $("staff").addEventListener("pointerdown", e => {
   const frame = document.querySelector(".staffFrame");
   staffPan = { id: e.pointerId, x: e.clientX, sl: frame.scrollLeft, active: false, frame };
 }, { passive: true });
-$("staff").addEventListener("pointermove", e => {
+window.addEventListener("pointermove", e => {
+  /* window-level: the finger drifting off the staff mid-swipe must not
+     freeze the pan (element-level listeners stop receiving those moves) */
   if (!staffPan || e.pointerId !== staffPan.id) return;
-  if (drag || grab || gdrag || pgrab) { staffPan = null; return; }
+  if (drag || grab || gdrag || pgrab || marq) { staffPan = null; return; }
   const dx = e.clientX - staffPan.x;
   if (!staffPan.active && Math.abs(dx) > 10) staffPan.active = true;
   if (staffPan.active) staffPan.frame.scrollLeft = staffPan.sl - dx;
@@ -7058,9 +7093,10 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 39;
+const BUILD = 40;
 /* init */
 viewRangeInit();
+hzoomInit();
 applySpacing();
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
