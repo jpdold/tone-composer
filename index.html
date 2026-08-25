@@ -119,6 +119,15 @@
   .staffFrame { overflow-x: auto; border: 1px solid #eee; border-radius: 6px; margin-bottom: 10px;
     -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
   .staffFrame.studio { border: 2.5px dashed #1565c0; padding: 7px 9px; }
+  #qtBay { position: fixed; z-index: 940; background: #fff; border: 2px solid #000; border-radius: 8px;
+    padding: 4px; display: flex; gap: 3px; align-items: center; box-shadow: 0 3px 14px rgba(0,0,0,0.25);
+    touch-action: none; user-select: none; }
+  #qtBay.vert { flex-direction: column; }
+  #qtBay .qtHandle { cursor: grab; font-size: 14px; color: #666; padding: 2px 4px; }
+  #qtBay button { width: 34px; height: 34px; font-size: 15px; padding: 0; }
+  #qtBay .qtChrome { width: 26px; height: 26px; font-size: 12px; }
+  #qtBay .qtEmpty { opacity: 0.35; font-size: 18px; }
+  body.theme-gy #qtBay { background: #6a6d71; border-color: #000; }
   #pcompStrip { border: 2px solid #1565c0; border-radius: 8px; padding: 8px; margin: 2px 2px 10px;
     display: flex; gap: 8px; align-items: flex-start; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .pcTitle { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #1565c0;
@@ -5336,6 +5345,166 @@ function renderPcomp() {
   strip.append(ctr);
 }
 
+/* ── Quick Tools bay: a small floating, draggable palette of tool buttons ── */
+const QT_CATALOG = [
+  ["penMode", "✎", "Insert"], ["selMode", "▣", "Select"], ["grabMode", "✋", "Grab"],
+  ["dragMode", "↔", "Resize"], ["deleteMode", "🗑", "Delete"], ["timeAdjust", "⏱", "Adjust"],
+  ["restMode", "𝄽", "Rest"], ["chordMode", "♯", "Chord+"], ["mergeMode", "🔗", "Merge"],
+  ["loopMode", "⟲", "Loop"], ["colorMode", "🎨", "Color"], ["quantMode", "▦", "Quantize"],
+  ["stencilMode", "◫", "Stencil"], ["gapRestMode", "⌷", "Gap→Rest"],
+];
+const QT_MAX = 5;
+const qtInfo = k => QT_CATALOG.find(c => c[0] === k) || null;
+function qtNorm(q) {
+  const out = { open: !!(q && q.open), x: Number.isFinite(+q?.x) ? +q.x : 12,
+    y: Number.isFinite(+q?.y) ? +q.y : 130, vert: !!(q && q.vert),
+    slots: Array.isArray(q?.slots) ? q.slots.slice(0, 6) : null };
+  if (!out.slots) out.slots = ["penMode", "selMode", "grabMode", "dragMode", null, null];
+  while (out.slots.length < 6) out.slots.push(null);
+  out.slots = out.slots.map(k => qtInfo(k) ? k : null);
+  let n = 0;
+  out.slots = out.slots.map(k => (k && ++n > QT_MAX) ? null : k);   // hard cap: 5 assigned
+  return out;
+}
+let QT = qtNorm(null);
+function qtInit() {
+  try { QT = qtNorm(JSON.parse(localStorage.getItem("toneComposerV2.qtools") || "null")); } catch (e) {}
+}
+function qtStore() {
+  try { localStorage.setItem("toneComposerV2.qtools", JSON.stringify(QT)); } catch (e) {}
+}
+function qtArm(k) {
+  if (k === "chordMode") armMode("chordMode", ["timeAdjust", "stencilMode"]);
+  else if (k === "timeAdjust") armMode("timeAdjust", ["chordMode"]);
+  else if (k === "stencilMode") armMode("stencilMode", ["chordMode"]);
+  else armMode(k);
+}
+let qtDrag = null;
+function qtClamp() {
+  const el = $("qtBay");
+  if (!el) return;
+  const r = el.getBoundingClientRect();
+  QT.x = Math.max(2, Math.min(window.innerWidth - r.width - 2, QT.x));
+  QT.y = Math.max(2, Math.min(window.innerHeight - r.height - 2, QT.y));
+  el.style.left = QT.x + "px";
+  el.style.top = QT.y + "px";
+}
+function renderQtBay() {
+  let el = $("qtBay");
+  if (!QT.open) { if (el && el.parentNode) el.remove(); return; }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "qtBay";
+    document.body.append(el);
+    el.addEventListener("pointerdown", e => {
+      if (!e.target.classList.contains("qtHandle")) return;
+      try { el.setPointerCapture(e.pointerId); } catch (err) {}
+      qtDrag = { id: e.pointerId, dx: e.clientX - QT.x, dy: e.clientY - QT.y };
+    });
+    el.addEventListener("pointermove", e => {
+      if (!qtDrag || e.pointerId !== qtDrag.id) return;
+      QT.x = e.clientX - qtDrag.dx;
+      QT.y = e.clientY - qtDrag.dy;
+      qtClamp();
+    });
+    const end = e => { if (qtDrag && e.pointerId === qtDrag.id) { qtDrag = null; qtStore(); } };
+    el.addEventListener("pointerup", end);
+    el.addEventListener("pointercancel", end);
+  }
+  el.classList.toggle("vert", QT.vert);
+  el.replaceChildren();
+  const handle = document.createElement("span");
+  handle.className = "qtHandle";
+  handle.textContent = "⠿";
+  handle.title = "Drag to move the bay";
+  el.append(handle);
+  QT.slots.forEach((k, i) => {
+    const b = document.createElement("button");
+    const info = k && qtInfo(k);
+    if (info) {
+      b.className = "btn" + (S[k] ? " active" : "");
+      b.textContent = info[1];
+      b.title = info[2];
+      b.addEventListener("click", () => qtArm(k));
+    } else {
+      b.className = "btn qtEmpty";
+      b.textContent = "＋";
+      b.title = "Assign a tool to this slot";
+      const slot = i;
+      b.addEventListener("click", () => openQtAssign(slot));
+    }
+    el.append(b);
+  });
+  const orient = document.createElement("button");
+  orient.className = "btn qtChrome";
+  orient.textContent = QT.vert ? "⇄" : "⇅";
+  orient.title = QT.vert ? "Lay the bay out as a row" : "Stand the bay up as a column";
+  orient.addEventListener("click", () => { QT.vert = !QT.vert; qtStore(); renderAll(); qtClamp(); });
+  const gear = document.createElement("button");
+  gear.className = "btn qtChrome";
+  gear.textContent = "⚙";
+  gear.title = "Assign tools to the slots";
+  gear.addEventListener("click", () => openQtAssign(null));
+  const close = document.createElement("button");
+  close.className = "btn qtChrome";
+  close.textContent = "✕";
+  close.title = "Close the bay (Tools menu reopens it)";
+  close.addEventListener("click", () => { QT.open = false; qtStore(); renderAll(); });
+  el.append(orient, gear, close);
+  qtClamp();
+}
+function openQtAssign(focusSlot) {
+  const body = document.createElement("div");
+  const sels = [];
+  for (let i = 0; i < 6; i++) {
+    const line = document.createElement("div");
+    line.className = "mline";
+    const lab = document.createElement("span");
+    lab.style.cssText = "font-size:12px;min-width:52px";
+    lab.textContent = `Slot ${i + 1}:`;
+    const sel = document.createElement("select");
+    sel.className = "pitchSel";
+    const none = document.createElement("option");
+    none.value = ""; none.textContent = "— empty —";
+    sel.append(none);
+    QT_CATALOG.forEach(([k, g, l]) => {
+      const o = document.createElement("option");
+      o.value = k; o.textContent = `${g} ${l}`;
+      if (QT.slots[i] === k) o.selected = true;
+      sel.append(o);
+    });
+    sels.push(sel);
+    line.append(lab, sel);
+    body.append(line);
+  }
+  const err = document.createElement("div");
+  err.style.cssText = "color:#c62828;font-size:12px;min-height:15px";
+  const line = document.createElement("div");
+  line.className = "mline";
+  const ok = document.createElement("button");
+  ok.className = "btn active"; ok.textContent = "Apply";
+  ok.addEventListener("click", () => {
+    const slots = sels.map(sel => sel.value || null);
+    const assigned = slots.filter(Boolean);
+    if (assigned.length > QT_MAX) { err.textContent = `Up to ${QT_MAX} assignments — clear ${assigned.length - QT_MAX}.`; return; }
+    if (new Set(assigned).size !== assigned.length) { err.textContent = "The same tool is in two slots."; return; }
+    QT.slots = slots;
+    qtStore();
+    closeModal();
+    renderAll();
+  });
+  const cancel = document.createElement("button");
+  cancel.className = "btn"; cancel.textContent = "Cancel";
+  cancel.addEventListener("click", closeModal);
+  line.append(ok, cancel);
+  const note = document.createElement("div");
+  note.style.cssText = "font-size:12px;color:#666";
+  note.textContent = `Up to ${QT_MAX} of the 6 slots may hold a tool.`;
+  body.append(err, line, note);
+  showModal("Quick Tools bay — assignments", body);
+  if (focusSlot != null && sels[focusSlot]) sels[focusSlot].focus();
+}
+
 function renderStaffNav() {
   const el = $("staffNav");
   const show = !S.patEdit;
@@ -6401,7 +6570,7 @@ function renderSaved() {
 
 function renderAll() {
   renderControls(); renderBarNav(); renderStatus();
-  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderPcomp(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
+  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderPcomp(); renderQtBay(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
 }
 
 /* ─────────────── wiring ─────────────── */
@@ -6836,6 +7005,12 @@ function renderMenus() {
   /* Tools */
   const dt = $("ddTools");
   dt.replaceChildren();
+  dt.append(mItem("Quick Tools bay", () => {
+    QT.open = !QT.open;
+    qtStore();
+    if (QT.open) flash("Quick Tools — drag ⠿ to move it, ⇅ turns it into a column, ⚙ assigns the slots.");
+    renderAll();
+  }, { check: QT.open }), mSep());
   TOOL_MENU.forEach(([label, mode, keeps]) =>
     dt.append(mItem(label, () => armMode(mode, keeps), { check: !!S[mode] })));
   /* MIDI */
@@ -7093,10 +7268,11 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 40;
+const BUILD = 41;
 /* init */
 viewRangeInit();
 hzoomInit();
+qtInit();
 applySpacing();
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
