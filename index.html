@@ -3242,8 +3242,14 @@ function penInsert(clickX, clickY) {
   if (!bar().length) { t = 0; snapped = t !== 0 ? snapped : snapped; }
   if (!S.penAnywhere) {
     /* a click above, below, or on an existing note WITHIN its duration is a
-       chord: the new tone takes that note's exact start and duration */
-    const host = bar().filter(e => e.type === "note" && t >= e.start - 1e-9 && t < evEnd(e) - 1e-9)
+       chord: the new tone takes that note's exact start and duration.
+       Uniform displays (round/pill) hide the duration span, so there the
+       chord window is only what's VISIBLE — the glyph itself — and a tap in
+       the seemingly empty space beyond it places the NEXT note instead. */
+    const hostWin = e => NOTE_STYLE === "classic"
+      ? evEnd(e) - 1e-9
+      : e.start + Math.max(NOTE_STYLES[NOTE_STYLE][0], 12) / lastPxPerSec;
+    const host = bar().filter(e => e.type === "note" && t >= e.start - 1e-9 && t < hostWin(e))
       .sort((a, b) => b.start - a.start)[0];
     if (host) {
       if (host.midis.includes(midi) || coincidentTwin(host, midi)) {
@@ -3593,9 +3599,10 @@ function renderStaff() {
       "pointer-events": "none", "data-cl": ev.id, "data-x0": x, "data-time": "1", "data-timey": "1" },
       `${(S.stencilMode || S.notation === "tonal") ? (durGlyph(ev.dur) ? durGlyph(ev.dur) + " " : "") : ""}${fmt(ev.start)}–${fmt(evEnd(ev))} s`));
 
-    /* chord-mode full-height drop zone across this note's span */
+    /* chord-mode full-height drop zone across this note's span — always the
+       TRUE duration span (never just the uniform glyph) so it stays easy to hit */
     if (S.chordMode && !S.timeAdjust && ev.type === "note") {
-      const zone = svgEl("rect", { x, y: PAD_T, width: w, height: STAFF_H - PAD_T - PAD_B,
+      const zone = svgEl("rect", { x, y: PAD_T, width: Math.max(ev.dur * pxPerSec, w), height: STAFF_H - PAD_T - PAD_B,
         fill: "rgba(0,0,0,0.02)" });
       zone.style.cursor = "copy";
       zone.addEventListener("click", e => {
