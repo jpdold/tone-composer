@@ -622,6 +622,22 @@ function setHzoom(v) {
   HZOOM = Math.min(4, Math.max(0.125, v));
   try { localStorage.setItem("toneComposerV2.hzoom", String(HZOOM)); } catch (e) {}
 }
+/* note display: classic draws each note as long as its duration; round and
+   pill draw every note at one uniform size regardless of duration (timing is
+   read from position and the labels). Uniform glyph metrics: [width, height]. */
+let NOTE_STYLE = "classic";
+const NOTE_STYLES = { round: [13, 13], pill: [24, 9] };
+const UNI_MIN_GAP = 8;                     // px of breathing room between uniform glyphs
+function noteStyleInit() {
+  try {
+    const v = localStorage.getItem("toneComposerV2.noteStyle");
+    if (v === "classic" || v === "round" || v === "pill") NOTE_STYLE = v;
+  } catch (e) {}
+}
+function setNoteStyle(v) {
+  NOTE_STYLE = v;
+  try { localStorage.setItem("toneComposerV2.noteStyle", v); } catch (e) {}
+}
 function viewRangeInit() {
   try {
     const lo = parseInt(localStorage.getItem("toneComposerV2.viewLo"), 10);
@@ -2666,7 +2682,7 @@ function updateGroupVisuals() {
     const midis = ev.type === "bass" ? [ev.midi] : (ev.midis || null);
     document.querySelectorAll(`[data-ev='${id}']`).forEach(r => {
       r.setAttribute("x", xNew);
-      if (midis && r.dataset.idx !== undefined) r.setAttribute("y", yOfMidi(midis[+r.dataset.idx]) - 4);
+      if (midis && r.dataset.idx !== undefined) r.setAttribute("y", yOfMidi(midis[+r.dataset.idx]) - (+r.dataset.hh || 4));
     });
     document.querySelectorAll(`[data-cl='${id}']`).forEach(t => {
       t.setAttribute("x", xNew + w / 2);
@@ -3148,7 +3164,7 @@ function updateGrabVisuals(ev) {
   const midis = ev.type === "bass" ? [ev.midi] : (ev.midis || null);
   document.querySelectorAll(`[data-ev='${grab.id}']`).forEach(r => {
     r.setAttribute("x", xNew);
-    if (midis && r.dataset.idx !== undefined) r.setAttribute("y", yOfMidi(midis[+r.dataset.idx]) - 4);
+    if (midis && r.dataset.idx !== undefined) r.setAttribute("y", yOfMidi(midis[+r.dataset.idx]) - (+r.dataset.hh || 4));
   });
   document.querySelectorAll(`[data-cl='${grab.id}']`).forEach(t => {
     t.setAttribute("x", xNew + w / 2);
@@ -3325,8 +3341,19 @@ function renderStaff() {
   const targetW = Math.max(BASE_W, (frame && frame.clientWidth ? frame.clientWidth : 0) - 4);
   const fitPx = (targetW - PAD_L - PAD_R) / Math.max(totalDur, 2);
   const needPx = minDur === Infinity ? 0 : MIN_EV_PX / minDur;
+  /* uniform note display: whatever the zoom, consecutive entries must sit at
+     least a glyph-width plus a margin apart so they never overlap or clutter */
+  let uniPx = 0;
+  if (NOTE_STYLE !== "classic") {
+    const gw = NOTE_STYLES[NOTE_STYLE][0];
+    const starts = [...new Set(b.filter(e => e.type === "note" || e.type === "bass")
+      .map(e => Math.round(e.start * 1000) / 1000))].sort((p, q) => p - q);
+    let minDelta = Infinity;
+    for (let i = 1; i < starts.length; i++) minDelta = Math.min(minDelta, starts[i] - starts[i - 1]);
+    if (isFinite(minDelta) && minDelta > 0.0005) uniPx = Math.min((gw + UNI_MIN_GAP) / minDelta, 2000);
+  }
   const pxPerSec = drag ? drag.pxPerSec : grab ? grab.pxPerSec : gdrag ? gdrag.px
-    : Math.min(Math.max(fitPx, needPx), 400) * HZOOM;
+    : Math.max(Math.min(Math.max(fitPx, needPx), 400) * HZOOM, uniPx);
   lastPxPerSec = pxPerSec;
   /* entry runway: generous empty, clickable staff beyond the content so there
      is always ample room to place the next notes (scrolls; swipe or drag) */
@@ -3421,7 +3448,10 @@ function renderStaff() {
   /* events */
   sorted.forEach(ev => {
     const x = X(ev.start);
-    const w = Math.max(ev.dur * pxPerSec, 6);
+    /* uniform styles size notes/bass identically regardless of duration;
+       rests and classic notes keep their true duration span */
+    const uni = NOTE_STYLE !== "classic" && (ev.type === "note" || ev.type === "bass");
+    const w = uni ? NOTE_STYLES[NOTE_STYLE][0] : Math.max(ev.dur * pxPerSec, 6);
     const selected = S.selectedId === ev.id || (S.mergeMode && S.mergeSel.has(ev.id)) ||
       (S.quantMode && S.quantSel.has(ev.id)) || (S.selMode && S.groupSel.has(ev.id)) ||
       (S.stencilMode && S.stencilSel.has(ev.id));
@@ -3521,12 +3551,13 @@ function renderStaff() {
       const cust = toneColor(ev, m);
       const toneFill = merged ? "#777" : (cust || (isBass ? "#666" : TH().note));
       const mutedOp = ev.muted ? 0.28 : (isBass ? 0.9 : 1);
+      const gh = uni ? NOTE_STYLES[NOTE_STYLE][1] : 8;
       const barShape = svgEl("rect", {
-        x, y: y - 4, width: w, height: 8, rx: 4,
+        x, y: y - gh / 2, width: w, height: gh, rx: uni ? gh / 2 : 4,
         fill: toneFill,
         opacity: mutedOp,
         "data-ev": ev.id, "data-basefill": toneFill,
-        "data-baseop": mutedOp, "data-idx": ti,
+        "data-baseop": mutedOp, "data-idx": ti, "data-hh": gh / 2,
       });
       if (ev.muted) { barShape.setAttribute("stroke", "#555"); barShape.setAttribute("stroke-width", 1); barShape.setAttribute("stroke-dasharray", "3 2"); }
       if (cust && isLight(cust)) { barShape.setAttribute("stroke", "#999"); barShape.setAttribute("stroke-width", 1); }
@@ -5408,7 +5439,8 @@ function renderPcomp() {
 
 /* ── Quick Tools bay: a small floating, draggable palette of tool buttons ── */
 const QT_CATALOG = [
-  ["penMode", "✎", "Insert"], ["selMode", "▣", "Select"], ["grabMode", "✋", "Grab"],
+  ["penMode", "✎", "Insert"], ["selMode", "▣", "Select"], ["selAll", "⛶", "Select all"],
+  ["grabMode", "✋", "Grab"],
   ["dragMode", "↔", "Resize"], ["deleteMode", "🗑", "Delete"], ["timeAdjust", "⏱", "Adjust"],
   ["restMode", "𝄽", "Rest"], ["chordMode", "♯", "Chord+"], ["mergeMode", "🔗", "Merge"],
   ["loopMode", "⟲", "Loop"], ["colorMode", "🎨", "Color"], ["quantMode", "▦", "Quantize"],
@@ -5435,7 +5467,8 @@ function qtStore() {
   try { localStorage.setItem("toneComposerV2.qtools", JSON.stringify(QT)); } catch (e) {}
 }
 function qtArm(k) {
-  if (k === "chordMode") armMode("chordMode", ["timeAdjust", "stencilMode"]);
+  if (k === "selAll") selectAllCurrent();
+  else if (k === "chordMode") armMode("chordMode", ["timeAdjust", "stencilMode"]);
   else if (k === "timeAdjust") armMode("timeAdjust", ["chordMode"]);
   else if (k === "stencilMode") armMode("stencilMode", ["chordMode"]);
   else armMode(k);
@@ -5596,6 +5629,8 @@ function renderStaffNav() {
   }
   /* zoom controls — available in the composition AND the Pattern Studio;
      a two-finger pinch on the staff does the same thing continuously */
+  nb("⛶ Select all", "Enter Select mode and select every event on this staff",
+     selectAllCurrent, !bar().length);
   nb("◧ Shrink", "Halve how long the notes LOOK — durations are unchanged (pinch the staff for fine control)",
      () => { setHzoom(HZOOM / 2); renderAll(); }, HZOOM <= 0.125);
   nb("◨ Magnify", "Double the appearance — durations are unchanged (pinch the staff for fine control)",
@@ -6804,14 +6839,18 @@ $("loopBtn").addEventListener("click", () => armMode("loopMode"));
 $("colorBtn").addEventListener("click", () => armMode("colorMode"));
 $("quantBtn").addEventListener("click", () => armMode("quantMode"));
 $("selBtn").addEventListener("click", () => armMode("selMode"));
-$("selAllBtn").addEventListener("click", () => {
+/* one tap: enter Select mode and select every event on the current staff —
+   reachable from the Tools menu, the staff nav bar, the Quick Tools bay, and
+   the (desktop) toolbar; works on a composition bar and the Studio draft alike */
+function selectAllCurrent() {
   if (!S.selMode) armMode("selMode");     /* arming clears prior selections */
   const n = bar().length;
   if (!n) { flash("Nothing to select — this staff has no events yet."); renderAll(); return; }
   bar().forEach(e => S.groupSel.add(e.id));
   flash(`Selected all ${n} event${n === 1 ? "" : "s"} on this staff. Use the panel's “All (bars…)” / “All (composition)” for wider scopes.`);
   renderAll();
-});
+}
+$("selAllBtn").addEventListener("click", selectAllCurrent);
 $("barSelBtn").addEventListener("click", () => {
   S.barSelMode = !S.barSelMode;
   if (!S.barSelMode) S.barSel.clear();
@@ -7150,6 +7189,7 @@ function renderMenus() {
   }, { check: QT.open }), mSep());
   TOOL_MENU.forEach(([label, mode, keeps]) =>
     dt.append(mItem(label, () => armMode(mode, keeps), { check: !!S[mode] })));
+  dt.append(mSep(), mItem("⛶ Select all (this staff)", selectAllCurrent));
   /* MIDI */
   const dm = $("ddMIDI");
   dm.replaceChildren();
@@ -7212,6 +7252,15 @@ function renderMenus() {
       applySpacing();
       renderAll();
     }, { radio: S.spacing === key })));
+  dv.append(mSep(), mHead("Note display"));
+  [["Classic — length shows duration", "classic"], ["Round — uniform dots", "round"], ["Pill — uniform pills", "pill"]].forEach(([lab, key]) =>
+    dv.append(mItem(lab, () => {
+      setNoteStyle(key);
+      flash(key === "classic"
+        ? "Classic display — each note is drawn as long as its duration."
+        : `Uniform ${key} display — every note is one size; position and the labels carry the timing, and spacing auto-widens so entries never overlap.`);
+      renderAll();
+    }, { radio: NOTE_STYLE === key })));
   dv.append(mSep(), mHead("Theme"));
   [["Classic", "classic"], ["Gray / Yellow", "gy"]].forEach(([lab, key]) =>
     dv.append(mItem(lab, () => {
@@ -7409,6 +7458,7 @@ const BUILD = 42;
 /* init */
 viewRangeInit();
 hzoomInit();
+noteStyleInit();
 qtInit();
 applySpacing();
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
