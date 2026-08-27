@@ -20,8 +20,27 @@
 
   .apptitle { text-align: center; margin: 4px 0 8px; }
   #menubar { display: flex; align-items: center; gap: 2px; border: 1px solid #000;
-    border-radius: 6px; padding: 2px 6px; margin-bottom: 12px; background: #fff;
+    border-radius: 6px; padding: 2px 6px; margin-bottom: 12px; background: #ececec;
     position: sticky; top: 4px; z-index: 40; flex-wrap: wrap; }
+  #menubar .menu > button { font-weight: 700; }
+  #menubar .menu > button:hover { text-decoration: underline; }
+  #toolsBar { display: none; align-items: center; gap: 3px; flex-wrap: wrap; border: 1px solid #000;
+    border-radius: 6px; padding: 3px 6px; margin: -6px 0 12px; background: #ececec; }
+  #toolsBar button { font-size: 12px; padding: 2px 7px; height: 24px; }
+  @media (min-width: 980px) {
+    #toolsBar { display: flex; }
+    #menubar .menu[data-m="tools"] { display: none; }
+  }
+  .mitem .mk { display: inline-block; width: 15px; flex: none; }
+  .instrTbl { width: 100%; border-collapse: collapse; background: #f0f0f0; border-radius: 6px;
+    margin: 6px 0 14px; font-size: 12.5px; }
+  .instrTbl td { padding: 5px 8px; border-bottom: 1px solid #ddd; vertical-align: top; }
+  .instrTbl td:first-child { width: 34px; text-align: center; font-size: 15px; }
+  .instrTbl td:nth-child(2) { width: 120px; font-weight: 700; white-space: nowrap; }
+  .instrHead { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #555;
+    font-weight: 700; margin: 10px 0 2px; }
+  body.theme-gy #toolsBar { background: #63666a; }
+  body.theme-gy .instrTbl { background: #7a7d81; }
   #menubar .menu { position: relative; }
   #menubar .menu > button { border: none; background: none; font: inherit; font-size: 13px;
     padding: 7px 12px; cursor: pointer; border-radius: 4px; }
@@ -271,6 +290,9 @@
   <div id="menubar">
     <div class="menu" data-m="file"><button>File</button>
       <div class="dropdown">
+        <button class="mitem" id="mNewC">New</button>
+        <button class="mitem" id="mOpenC">Open…</button>
+        <div class="msep"></div>
         <button class="mitem" id="mSave">Save</button>
         <button class="mitem" id="mExport">Export .json</button>
         <button class="mitem" id="mImport">Import…</button>
@@ -473,6 +495,7 @@
         <button id="scrollLBtn" class="btn small" title="Scroll the staff left">⟵</button>
         <button id="scrollRBtn" class="btn small" title="Scroll the staff right">⟶</button>
       </div>
+      <div id="toolsBar"></div>
       <div id="pcompStrip" style="display:none"></div>
       <div id="pcompBar" style="display:none"></div>
       <div id="staffNav" style="display:none"></div>
@@ -526,41 +549,7 @@
 
   <details class="acc" id="helpAcc">
   <summary>Instructions</summary>
-  <p class="footer">
-    Events carry absolute start/stop times within their bar. Melody presses append after the latest
-    melody/rest event; Click any note on the staff to select it (alignment, delete); right-click it — rests included — for
-    Enter Precise Start/Stop Timing. Chord+ stacks up to 5 tones on one event. ⏱ Adjust takes off / adds on time in 0.1 / 0.01 / 0.001 s
-    steps — whole chords with Chord+ on, single tones with it off. 🗑 Delete removes any clicked note,
-    chord tones included; ↔ Duration drags a note/chord/rest to resize it, snapping (yellow) when its
-    stop edge exactly meets another event's start (dragging forward) or stop (dragging backward).
-    ✋ Grab drags a note/chord through time (sideways) and transposes it (up/down); ✎ Insert places a
-    note wherever you click, at the preset duration; 🔗 Chord maker merges selected notes into one
-    chord that takes the length of its lowest tone. ⟲ Loop repeats a chosen span — click a start note
-    then a stop note, pick continuous or a count; entries inside are tagged ⟲. 🎨 Color paints notes
-    (basic palette) and supports pitch-range rules (e.g., all F2–F3 green); labels on light hues use
-    black text, on dark hues white. ▦ Quantize retimes selected tones as a 2/3/4/5/6(triplet)/8/9(arp)/16-set
-    of equal back-to-back durations, steppable by ±0.1/0.01/0.001 s before or after applying.
-    ▣ Select builds a multi-note group: drag any selected note to move the whole group in time and
-    pitch, set every duration at once, or 🔇 mute the selection so it stays visible but silent in
-    playback (mute persists through save/export).
-    Mode toggle: Atonal is the free-time system; Tonal adds key signature (♯/♭ spelling), time
-    signature with a beat grid and bar-end marker, tempo, and an instrument label — still strictly
-    sine tones; switching modes starts a new composition (save first — the prompt will remind you).
-    Theme toggle: Classic (white/black) or Gray/Yellow.
-    ◫ Stencil (Beat Stencil Overlay, ♩ = 1 beat, default 60 BPM): pick whole/half/quarter/8th/16th/32nd
-    (+ dot or double dot) and every key or MIDI press enters exactly that value in sequence — press
-    length is ignored; with Chord+ on, entries stack into chords (max 7) until Next ▸; staff clicks
-    select notes to re-value ("Set to ♩") or reshape with rhythm overlays (swing, tresillo, habanera,
-    galop, and more); Quantized β (40–140 BPM) instead keeps hold recording and snaps each duration
-    to the nearest beat value within max(±20–25 %, 20 ms). 🎹 MIDI input (Chrome/Edge): enable it, play a connected keyboard (e.g., Roland A-49), and
-    key-down/key-up record notes at literal held durations with true polyphonic overlap; Chord
-    group merges keys struck within 35 ms into one chord. Notes outside C2–F7 are ignored. Durations are uncapped; end a bar
-    whenever you choose with ⏭ End bar. Undo reverses recordings, chord tones, chord splits, deletions,
-    and timing edits. Saves live in THIS browser on THIS device (localStorage) — they do not travel with the
-    HTML file. To move compositions between devices: Export all (one bundle file) or Copy all
-    (clipboard → email/note), then Import / Paste import on the other device. Exported .json files
-    are the durable master copies.
-  </p>
+  <div id="instrBody"></div>
   </details>
 
   <div class="copyright" id="copyLine">Sine Tone Composer © 2026</div>
@@ -4261,6 +4250,8 @@ function renderSel() {
    absolute in compositions: transposable and time-draggable only, boxed
    in the pattern's color, with Li / Lo / ×N loop modes per instance.   */
 const PAT_SLOTS = 16, PAT_MAX_GROUP = 8, PAT_DEFAULT_COLOR = "#1b5e20";
+const PAT_LIB_CAP = 6;
+let patLibAll = false;
 const PAT_LSKEY = "toneComposerV2.patterns", PATSET_LSKEY = "toneComposerV2.patset";
 function patLoad() {
   try {
@@ -5728,6 +5719,81 @@ function openQtAssign(focusSlot) {
   if (focusSlot != null && sels[focusSlot]) sels[focusSlot].focus();
 }
 
+const INSTR_TOOLS = [
+  ["✎", "Insert", "Places a note at the tapped pitch and time. A tap inside an existing note makes a chord; \"Anywhere\" places at the exact click."],
+  ["▣", "Select", "Tap notes, or drag a box around a group, to select. The panel then sets duration, shape, mute, transpose, and more."],
+  ["✋", "Grab", "Drags a note or pattern through time (sideways) and transposes it (up / down)."],
+  ["↔", "Resize", "Drags a note, chord, or rest to change its duration; snaps when its edge meets a neighbour."],
+  ["🗑", "Delete", "Removes any tapped note, chord tone, rest, or pattern instance."],
+  ["♯", "Chord+", "Taps above or below a note stack independent chord tones on it; tapping a chord tone removes just that tone."],
+  ["𝄽", "Rest", "The press-and-hold pad enters silence of the held length."],
+  ["⏱", "Adjust", "Takes off / adds on time in 0.1 / 0.01 / 0.001 s steps."],
+  ["🔗", "Merge", "Joins two tapped events into one."],
+  ["⟲", "Loop", "Sets a loop count or infinite repeat for playback."],
+  ["🎨", "Color", "Paints tapped notes, or applies pitch-range colour rules."],
+  ["◫", "Stencil", "Beat-grid entry: exact note values at a tempo, with dot / double-dot, harmony, and quantized live entry."],
+  ["▦", "Quantize", "Snaps selected entries to the nearest beat value within a margin."],
+  ["⌷", "Gap→Rest", "Tap inside a silent gap to fill it with a rest."],
+  ["⛶", "Select all", "Selects every event on the current staff."],
+];
+const INSTR_FUNCS = [
+  ["▶⏸■", "Playback", "Play the bar or the whole composition; the mini transport stays pinned top-right."],
+  ["⏮◀▶⏭", "Bar navigation", "First / previous / next / last bar; the label shows the bar and its note count (coinciding tones count once)."],
+  ["⏭", "End bar here", "Finishes the bar at its current content length and moves to a fresh one."],
+  ["◧◨", "Shrink / Magnify", "Halves or doubles how long notes LOOK — durations never change."],
+  ["▲", "Time marker", "Drag the triangle along the staff bottom for a millisecond readout; release to plant a red line; tap it to hide."],
+  ["▤", "Bars view", "View menu: 4 / 8 / 12 / 16 bars as one continuous wrapped staff; tap a bar to select, again to edit."],
+  ["♪", "Staff range", "View menu: the visible pitch window (default C3–D5, full C2–F7, or custom). Out-of-window notes show ▲▼ edge markers."],
+  ["●", "Note display", "View menu: classic duration bars, or uniform round / pill note heads."],
+  ["⧉", "Patterns", "Commit bars as reusable patterns in the Studio; the shelf keeps them; tap a library entry to drop it into the bar."],
+  ["▦", "Bank", "Patterns assigned to bars (all, a set, or a range) that play in time with them."],
+  ["🎼", "Create using patterns…", "The pattern rack: layer patterns with loops, start anchors, overlays, stopwatches, and save / load racks."],
+  ["🎹", "MIDI", "A connected keyboard records notes and chords with hardware-timestamp timing and optional velocity."],
+  ["🎤", "Audio in", "The microphone detects sung or played pitches and enters them; stencil / quantized entry applies."],
+  ["💾", "Save / Export", "Compositions save in the browser; Export / Import .json moves them between devices."],
+];
+function buildInstructions() {
+  const el = $("instrBody");
+  if (!el || !el.replaceChildren) return;
+  el.replaceChildren();
+  const mkTbl = (title, rows) => {
+    const h = document.createElement("div");
+    h.className = "instrHead";
+    h.textContent = title;
+    const t = document.createElement("table");
+    t.className = "instrTbl";
+    rows.forEach(([ic, nm, tx]) => {
+      const tr = document.createElement("tr");
+      [ic, nm, tx].forEach(v => {
+        const td = document.createElement("td");
+        td.textContent = v;
+        tr.append(td);
+      });
+      t.append(tr);
+    });
+    el.append(h, t);
+  };
+  mkTbl("Tools", INSTR_TOOLS);
+  mkTbl("Functions", INSTR_FUNCS);
+}
+function renderToolsBar() {
+  const el = $("toolsBar");
+  if (!el || !el.replaceChildren) return;
+  el.replaceChildren();
+  if (S.patEdit === undefined) return;
+  TOOL_MENU.forEach(([label, mode, keeps]) => {
+    const b = document.createElement("button");
+    b.className = "btn small" + (S[mode] ? " active" : "");
+    b.textContent = label;
+    b.addEventListener("click", () => armMode(mode, keeps));
+    el.append(b);
+  });
+  const sa = document.createElement("button");
+  sa.className = "btn small";
+  sa.textContent = "⛶ Select all";
+  sa.addEventListener("click", selectAllCurrent);
+  el.append(sa);
+}
 function renderStaffNav() {
   const el = $("staffNav");
   el.style.display = "flex";
@@ -6092,10 +6158,7 @@ function renderGridView() {
   if (!on) return;
   const cols = S.gridView === 4 ? 2 : 4;
   const rows = S.gridView / cols;
-  const hint = document.createElement("div");
-  hint.style.cssText = "font-size:11px;color:#888;margin:0 2px 4px";
-  hint.textContent = "One continuous staff — tap a bar to select it; tap it again (or ✎) to open it in the editor.";
-  wrap.append(hint);
+
   for (let r = 0; r < rows; r++) {
     const row = gridRowSvg(r * cols, cols);
     row.style.marginBottom = "10px";
@@ -6214,10 +6277,7 @@ function renderPatPanel() {
   r3.append(meter,
     mkB(`Commit P${P.groups.length + 1}`, cov.ok, () => patCommit(false), !cov.ok || used >= PAT_SLOTS),
     mkB("⏭ End bar here", false, () => patCommit(true), !evts.length || used >= PAT_SLOTS));
-  const eh = document.createElement("span");
-  eh.style.cssText = "font-size:11px;color:#999";
-  eh.textContent = "End bar here commits at the current length, ignoring the time signature";
-  r3.append(eh);
+
   if (used >= PAT_SLOTS) { const d = document.createElement("span"); d.style.cssText = "font-size:11px;color:#999"; d.textContent = "set full (16 bars used)"; r3.append(d); }
   el.append(r3);
 
@@ -6798,7 +6858,7 @@ function renderSaved() {
 
 function renderAll() {
   renderControls(); renderBarNav(); renderStatus();
-  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderPcomp(); renderQtBay(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
+  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderPcomp(); renderQtBay(); renderToolsBar(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
 }
 
 /* ─────────────── wiring ─────────────── */
@@ -7319,9 +7379,15 @@ function mItem(label, fn, opts = {}) {
   const b = document.createElement("button");
   b.className = "mitem";
   b.disabled = !!opts.disabled;
+  const left = document.createElement("span");
+  left.style.cssText = "display:flex;align-items:center;min-width:0";
+  const mk = document.createElement("span");
+  mk.className = "mk";
+  mk.textContent = opts.check === true ? "✓" : opts.radio === true ? "●" : opts.radio === false ? "○" : "";
   const l = document.createElement("span");
-  l.textContent = (opts.check === true ? "✓ " : opts.check === false ? "\u2003 " : opts.radio === true ? "● " : opts.radio === false ? "○ " : "") + label;
-  b.append(l);
+  l.textContent = label;
+  left.append(mk, l);
+  b.append(left);
   if (opts.hint) { const h = document.createElement("span"); h.className = "hintk"; h.textContent = opts.hint; b.append(h); }
   b.addEventListener("click", () => { closeMenus(); fn(); });
   return b;
@@ -7455,14 +7521,15 @@ function renderMenus() {
     () => { S.patEdit ? exitPatternStudio() : enterPatternStudio(); }, { check: !!S.patEdit }));
   dp.append(mItem("Insert pattern into composition…", () => openPatInsertModal(null)));
   dp.append(mItem("Add pattern to bank…", openBankAdd));
-  dp.append(mItem("Pattern Composer", pcompOpen, { check: !!(S.patEdit && S.pcompOpen) }));
+  dp.append(mItem("Create using patterns…", pcompOpen, { check: !!(S.patEdit && S.pcompOpen) }));
   dp.append(mSep(), mHead(`Library (${S.patterns.length})`));
+  /* the list stays short; See all expands it */
   if (!S.patterns.length) {
     const d0 = document.createElement("div");
     d0.className = "mrowi"; d0.style.cssText = "font-size:11px;color:#888";
     d0.textContent = "no committed patterns yet";
     dp.append(d0);
-  } else S.patterns.slice(0, 12).forEach(p => {
+  } else S.patterns.slice(0, patLibAll ? S.patterns.length : PAT_LIB_CAP).forEach(p => {
     const b = document.createElement("button");
     b.className = "mitem";
     const sw = document.createElement("span");
@@ -7482,6 +7549,13 @@ function renderMenus() {
     });
     dp.append(b);
   });
+  if (S.patterns.length > PAT_LIB_CAP)
+    dp.append(mItem(patLibAll ? "Show fewer" : `See all (${S.patterns.length})…`, () => {
+      patLibAll = !patLibAll;
+      renderAll();
+      const mb = document.querySelector('#menubar .menu[data-m="patterns"]');
+      if (mb) mb.classList.add("open");     // keep the menu open across the re-render
+    }));
   /* dynamic labels in static menus */
   $("mPause").textContent = S.paused ? "▶ Resume" : "⏸ Pause";
   $("mPause").disabled = !S.playing;
@@ -7504,6 +7578,29 @@ $("mCopy").addEventListener("click", editCopy);
 $("mPasteEv").addEventListener("click", editPasteEv);
 $("mDelSel").addEventListener("click", () => deleteIds(groupAllIds(), "Delete Selection"));
 proxy("mDelBarE", "delBarBtn");
+$("mNewC").addEventListener("click", () => {
+  const body = document.createElement("div");
+  const p = document.createElement("div");
+  p.style.cssText = "font-size:13px";
+  p.textContent = "Start a new composition? Unsaved changes to the current one are lost.";
+  const line = document.createElement("div");
+  line.className = "mline";
+  const ok = document.createElement("button");
+  ok.className = "btn active"; ok.textContent = "New composition";
+  ok.addEventListener("click", () => { closeModal(); startNewComposition(S.notation); flash("New composition."); });
+  const ca = document.createElement("button");
+  ca.className = "btn"; ca.textContent = "Cancel";
+  ca.addEventListener("click", closeModal);
+  line.append(ok, ca);
+  body.append(p, line);
+  showModal("New", body);
+});
+$("mOpenC").addEventListener("click", () => {
+  const acc = $("compsAcc");
+  acc.setAttribute("open", "");
+  acc.scrollIntoView({ behavior: "smooth", block: "start" });
+  flash("Saved compositions — tap one to open it.");
+});
 $("mExit").addEventListener("click", () => {
   const body = document.createElement("div");
   body.className = "mrow";
@@ -7621,12 +7718,13 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 45;
+const BUILD = 46;
 /* init */
 viewRangeInit();
 hzoomInit();
 noteStyleInit();
 qtInit();
+buildInstructions();
 applySpacing();
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
 patLoad();
