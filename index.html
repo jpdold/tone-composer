@@ -28,16 +28,17 @@
   #menubar .menu.open > button, #menubar .menu > button:hover { background: #000; color: #fff; }
   #menubar .dropdown { display: none; position: absolute; top: 100%; left: 0; z-index: 60;
     background: #fff; border: 1px solid #000; border-radius: 6px; min-width: 230px;
-    padding: 4px 0; box-shadow: 0 6px 18px rgba(0,0,0,.18); }
+    padding: 4px 0; box-shadow: 0 6px 18px rgba(0,0,0,.18);
+    max-height: calc(100vh - 96px); overflow-y: auto; overscroll-behavior: contain; }
   #menubar .menu.open .dropdown { display: block; }
   .mitem { display: flex; justify-content: space-between; align-items: center; gap: 14px;
-    width: 100%; padding: 7px 14px; background: none; border: none; text-align: left;
-    font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap; }
+    width: 100%; padding: 4px 14px; background: none; border: none; text-align: left;
+    font: inherit; font-size: 12.5px; line-height: 1.35; cursor: pointer; white-space: nowrap; }
   .mitem:hover:not(:disabled) { background: #000; color: #fff; }
   .mitem:disabled { opacity: .45; cursor: default; }
   .mitem .hintk { font-size: 11px; opacity: .55; }
   .msep { height: 1px; background: #ddd; margin: 4px 0; }
-  .mhead { padding: 5px 14px 3px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #888; }
+  .mhead { padding: 3px 14px 2px; font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: #888; }
   .mrowi { display: flex; align-items: center; gap: 10px; padding: 7px 14px; font-size: 13px; }
   #transportMini { margin-left: auto; display: flex; gap: 4px; align-items: center; }
   #transportMini .btn { padding: 5px 10px; }
@@ -389,7 +390,6 @@
         <button id="loopBtn" class="btn" title="Click a note to set the loop start, a later note to set the stop, then choose continuous or a repeat count">⟲ Loop</button>
         <button id="colorBtn" class="btn" title="Pick a color, then click notes/chords to color them; range rules color whole pitch spans">🎨 Color</button>
         <button id="selBtn" class="btn" title="Select multiple notes: drag any of them to move the whole group, set durations together, or mute them">▣ Select</button>
-        <button id="selAllBtn" class="btn" title="One tap: enter Select mode and select every event on this staff — works on a composition bar and on the Pattern Studio draft alike">⛶ Select all</button>
         <button id="stencilBtn" class="btn" title="Beat Stencil Overlay: set a tempo, pick a note value, and every click/MIDI key enters exactly that duration">◫ Stencil</button>
         <button id="trimBtn" class="btn" title="Remove extraneous time between bars — shifts each bar's events so the first starts at 0 s">⇤ Trim</button>
         <button id="gapsBtn" class="btn" title="Close empty time left by deleted entries in this bar — events end up 0.002 s apart">⇥ Gaps</button>
@@ -611,32 +611,22 @@ const SPACINGS_VALID = v => (v === "medium" || v === "large" || v === "default")
 let STEP = STEP_BASE;
 const VIEW_DEF_LO = 48, VIEW_DEF_HI = 74;               // C3–D5 default window
 let VIEW_LO = VIEW_DEF_LO, VIEW_HI = VIEW_DEF_HI;
+const TMARK = { t: 0, on: false };        // bottom-edge time slider + red marker line
+function tmRelease(t, moved) {
+  if (moved) { TMARK.t = Math.max(0, r3n(t)); TMARK.on = true; }
+  else TMARK.on = !TMARK.on;               // a plain tap toggles the line
+}
+let tmDrag = null;
 let HZOOM = 1;                                    // 1 = original appearance; 0.5, 0.25, 0.125 = shrunk
 function hzoomInit() {
   try {
     const v = parseFloat(localStorage.getItem("toneComposerV2.hzoom"));
-    if (isFinite(v) && v >= 0.125 && v <= 4) HZOOM = v;
+    if ([1, 0.5, 0.25, 0.125].includes(v)) HZOOM = v;
   } catch (e) {}
 }
 function setHzoom(v) {
-  HZOOM = Math.min(4, Math.max(0.125, v));
-  try { localStorage.setItem("toneComposerV2.hzoom", String(HZOOM)); } catch (e) {}
-}
-/* note display: classic draws each note as long as its duration; round and
-   pill draw every note at one uniform size regardless of duration (timing is
-   read from position and the labels). Uniform glyph metrics: [width, height]. */
-let NOTE_STYLE = "classic";
-const NOTE_STYLES = { round: [13, 13], pill: [24, 9] };
-const UNI_MIN_GAP = 8;                     // px of breathing room between uniform glyphs
-function noteStyleInit() {
-  try {
-    const v = localStorage.getItem("toneComposerV2.noteStyle");
-    if (v === "classic" || v === "round" || v === "pill") NOTE_STYLE = v;
-  } catch (e) {}
-}
-function setNoteStyle(v) {
-  NOTE_STYLE = v;
-  try { localStorage.setItem("toneComposerV2.noteStyle", v); } catch (e) {}
+  HZOOM = v;
+  try { localStorage.setItem("toneComposerV2.hzoom", String(v)); } catch (e) {}
 }
 function viewRangeInit() {
   try {
@@ -2186,12 +2176,7 @@ function eventClicked(ev, clickX, clickY, toneMidi) {
     renderAll();
     return;
   }
-  if (S.gapRestMode) {
-    flash(ev.type === "rest"
-      ? "That's already a rest — use 🗑 Delete, ↔ Resize, or ⏱ Adjust to change it."
-      : "That's a note — click the empty gap beside it.");
-    return;
-  }
+  if (S.gapRestMode) { flash("That's a note — click the empty gap beside it."); return; }
   /* plain click on the already-selected event deselects it */
   if (!MODES.some(k => S[k]) && S.selectedId === ev.id) {
     S.selectedId = null; S.selectedMidi = null;
@@ -2550,8 +2535,6 @@ function attachTap(el, fn, isRoot) {
   el.addEventListener("pointerup", e => {
     if (e.pointerId !== pid) { ttrace(`pu ${isRoot ? "staff" : "el"}: id-mismatch`); return; }
     pid = -1;
-    /* a two-finger pinch/pan must never register as a tap on either finger */
-    if (typeof pinch !== "undefined" && (pinch || pinchPts.size >= 2)) { ttrace("pu: pinch active"); return; }
     const dt = performance.now() - t0, dist = Math.hypot(e.clientX - sx, e.clientY - sy);
     if (dt > 900) { ttrace(`pu ${isRoot ? "staff" : "el"}: too slow ${Math.round(dt)}ms`); return; }
     if (dist > 10) { ttrace(`pu ${isRoot ? "staff" : "el"}: moved ${Math.round(dist)}px`); return; }
@@ -2577,15 +2560,13 @@ function attachTap(el, fn, isRoot) {
    that duration, drawn dotted so the counted time stays visible ── */
 function gapAt(t) {
   const evs = [...bar()].sort((a, b) => a.start - b.start || a.id - b.id);
+  if (!evs.length) return null;
   let frontier = 0;
   for (const ev of evs) {
     if (ev.start > frontier + 0.01 && t >= frontier - 1e-9 && t < ev.start)
       return { s: frontier, e: ev.start };
     frontier = Math.max(frontier, evEnd(ev));
   }
-  /* trailing gap: no subsequent note is required — a tap past the last event
-     (or anywhere in an empty bar) fills a rest from the frontier to the tap */
-  if (t > frontier + 0.05) return { s: frontier, e: t, tail: true };
   return null;
 }
 function allGaps() {
@@ -2600,13 +2581,11 @@ function allGaps() {
 }
 function gapRestAt(t) {
   const g = gapAt(t);
-  if (!g) { flash("Tap inside a gap between notes, or past the last note to add a trailing rest ending where you tap."); return; }
+  if (!g) { flash("Click inside a gap between two notes — the space before the first note counts too."); return; }
   const ev = { id: idCounter++, type: "rest", gapRest: true, start: r3(g.s), dur: r3(g.e - g.s) };
   S.bars[S.barIdx].push(ev);
   pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ev.id });
-  flash(g.tail
-    ? `Trailing rest registered: ${fmt(ev.dur)} s of silence from ${fmt(ev.start)} s to ${fmt(g.e)} s extends the bar.`
-    : `Rest registered: ${fmt(ev.dur)} s gap at ${fmt(ev.start)}–${fmt(g.e)} s now counts as silence.`);
+  flash(`Rest registered: ${fmt(ev.dur)} s gap at ${fmt(ev.start)}–${fmt(g.e)} s now counts as silence.`);
   renderAll();
 }
 
@@ -2687,7 +2666,7 @@ function updateGroupVisuals() {
     const midis = ev.type === "bass" ? [ev.midi] : (ev.midis || null);
     document.querySelectorAll(`[data-ev='${id}']`).forEach(r => {
       r.setAttribute("x", xNew);
-      if (midis && r.dataset.idx !== undefined) r.setAttribute("y", yOfMidi(midis[+r.dataset.idx]) - (+r.dataset.hh || 4));
+      if (midis && r.dataset.idx !== undefined) r.setAttribute("y", yOfMidi(midis[+r.dataset.idx]) - 4);
     });
     document.querySelectorAll(`[data-cl='${id}']`).forEach(t => {
       t.setAttribute("x", xNew + w / 2);
@@ -3169,7 +3148,7 @@ function updateGrabVisuals(ev) {
   const midis = ev.type === "bass" ? [ev.midi] : (ev.midis || null);
   document.querySelectorAll(`[data-ev='${grab.id}']`).forEach(r => {
     r.setAttribute("x", xNew);
-    if (midis && r.dataset.idx !== undefined) r.setAttribute("y", yOfMidi(midis[+r.dataset.idx]) - (+r.dataset.hh || 4));
+    if (midis && r.dataset.idx !== undefined) r.setAttribute("y", yOfMidi(midis[+r.dataset.idx]) - 4);
   });
   document.querySelectorAll(`[data-cl='${grab.id}']`).forEach(t => {
     t.setAttribute("x", xNew + w / 2);
@@ -3247,14 +3226,8 @@ function penInsert(clickX, clickY) {
   if (!bar().length) { t = 0; snapped = t !== 0 ? snapped : snapped; }
   if (!S.penAnywhere) {
     /* a click above, below, or on an existing note WITHIN its duration is a
-       chord: the new tone takes that note's exact start and duration.
-       Uniform displays (round/pill) hide the duration span, so there the
-       chord window is only what's VISIBLE — the glyph itself — and a tap in
-       the seemingly empty space beyond it places the NEXT note instead. */
-    const hostWin = e => NOTE_STYLE === "classic"
-      ? evEnd(e) - 1e-9
-      : e.start + Math.max(NOTE_STYLES[NOTE_STYLE][0], 12) / lastPxPerSec;
-    const host = bar().filter(e => e.type === "note" && t >= e.start - 1e-9 && t < hostWin(e))
+       chord: the new tone takes that note's exact start and duration */
+    const host = bar().filter(e => e.type === "note" && t >= e.start - 1e-9 && t < evEnd(e) - 1e-9)
       .sort((a, b) => b.start - a.start)[0];
     if (host) {
       if (host.midis.includes(midi) || coincidentTwin(host, midi)) {
@@ -3352,19 +3325,8 @@ function renderStaff() {
   const targetW = Math.max(BASE_W, (frame && frame.clientWidth ? frame.clientWidth : 0) - 4);
   const fitPx = (targetW - PAD_L - PAD_R) / Math.max(totalDur, 2);
   const needPx = minDur === Infinity ? 0 : MIN_EV_PX / minDur;
-  /* uniform note display: whatever the zoom, consecutive entries must sit at
-     least a glyph-width plus a margin apart so they never overlap or clutter */
-  let uniPx = 0;
-  if (NOTE_STYLE !== "classic") {
-    const gw = NOTE_STYLES[NOTE_STYLE][0];
-    const starts = [...new Set(b.filter(e => e.type === "note" || e.type === "bass")
-      .map(e => Math.round(e.start * 1000) / 1000))].sort((p, q) => p - q);
-    let minDelta = Infinity;
-    for (let i = 1; i < starts.length; i++) minDelta = Math.min(minDelta, starts[i] - starts[i - 1]);
-    if (isFinite(minDelta) && minDelta > 0.0005) uniPx = Math.min((gw + UNI_MIN_GAP) / minDelta, 2000);
-  }
   const pxPerSec = drag ? drag.pxPerSec : grab ? grab.pxPerSec : gdrag ? gdrag.px
-    : Math.max(Math.min(Math.max(fitPx, needPx), 400) * HZOOM, uniPx);
+    : Math.min(Math.max(fitPx, needPx), 400) * HZOOM;
   lastPxPerSec = pxPerSec;
   /* entry runway: generous empty, clickable staff beyond the content so there
      is always ample room to place the next notes (scrolls; swipe or drag) */
@@ -3459,10 +3421,7 @@ function renderStaff() {
   /* events */
   sorted.forEach(ev => {
     const x = X(ev.start);
-    /* uniform styles size notes/bass identically regardless of duration;
-       rests and classic notes keep their true duration span */
-    const uni = NOTE_STYLE !== "classic" && (ev.type === "note" || ev.type === "bass");
-    const w = uni ? NOTE_STYLES[NOTE_STYLE][0] : Math.max(ev.dur * pxPerSec, 6);
+    const w = Math.max(ev.dur * pxPerSec, 6);
     const selected = S.selectedId === ev.id || (S.mergeMode && S.mergeSel.has(ev.id)) ||
       (S.quantMode && S.quantSel.has(ev.id)) || (S.selMode && S.groupSel.has(ev.id)) ||
       (S.stencilMode && S.stencilSel.has(ev.id));
@@ -3517,9 +3476,6 @@ function renderStaff() {
       const r = ev.gapRest
         ? svgEl("rect", { x: x + 1, y: PAD_T + 6, width: Math.max(w - 2, 4), height: STAFF_H - PAD_T - PAD_B - 12,
             fill: "none", stroke: TH().tLabel, "stroke-width": 1.4, "stroke-dasharray": "4 4", rx: 4,
-            /* fill:none is invisible to hit-testing — without this the box
-               interior can't be tapped to select, resize, adjust, or delete */
-            "pointer-events": "all",
             "data-ev": ev.id, "data-basefill": "none" })
         : svgEl("rect", { x, y: PAD_T, width: w, height: STAFF_H - PAD_T - PAD_B,
             fill: restFill, "data-ev": ev.id, "data-basefill": restFill });
@@ -3565,13 +3521,12 @@ function renderStaff() {
       const cust = toneColor(ev, m);
       const toneFill = merged ? "#777" : (cust || (isBass ? "#666" : TH().note));
       const mutedOp = ev.muted ? 0.28 : (isBass ? 0.9 : 1);
-      const gh = uni ? NOTE_STYLES[NOTE_STYLE][1] : 8;
       const barShape = svgEl("rect", {
-        x, y: y - gh / 2, width: w, height: gh, rx: uni ? gh / 2 : 4,
+        x, y: y - 4, width: w, height: 8, rx: 4,
         fill: toneFill,
         opacity: mutedOp,
         "data-ev": ev.id, "data-basefill": toneFill,
-        "data-baseop": mutedOp, "data-idx": ti, "data-hh": gh / 2,
+        "data-baseop": mutedOp, "data-idx": ti,
       });
       if (ev.muted) { barShape.setAttribute("stroke", "#555"); barShape.setAttribute("stroke-width", 1); barShape.setAttribute("stroke-dasharray", "3 2"); }
       if (cust && isLight(cust)) { barShape.setAttribute("stroke", "#999"); barShape.setAttribute("stroke-width", 1); }
@@ -3607,10 +3562,9 @@ function renderStaff() {
       "pointer-events": "none", "data-cl": ev.id, "data-x0": x, "data-time": "1", "data-timey": "1" },
       `${(S.stencilMode || S.notation === "tonal") ? (durGlyph(ev.dur) ? durGlyph(ev.dur) + " " : "") : ""}${fmt(ev.start)}–${fmt(evEnd(ev))} s`));
 
-    /* chord-mode full-height drop zone across this note's span — always the
-       TRUE duration span (never just the uniform glyph) so it stays easy to hit */
+    /* chord-mode full-height drop zone across this note's span */
     if (S.chordMode && !S.timeAdjust && ev.type === "note") {
-      const zone = svgEl("rect", { x, y: PAD_T, width: Math.max(ev.dur * pxPerSec, w), height: STAFF_H - PAD_T - PAD_B,
+      const zone = svgEl("rect", { x, y: PAD_T, width: w, height: STAFF_H - PAD_T - PAD_B,
         fill: "rgba(0,0,0,0.02)" });
       zone.style.cursor = "copy";
       zone.addEventListener("click", e => {
@@ -3652,19 +3606,32 @@ function renderStaff() {
     svg.append(svgEl("text", { x: gx + gw / 2, y: PAD_T + 20, "text-anchor": "middle",
       "font-size": 9.5, fill: "#999", "pointer-events": "none" }, `⌷ ${fmt(g.e - g.s)} s`));
   });
-  /* Gap→Rest also fills AFTER the last event: outline the trailing runway; a
-     tap there makes a rest from the content end to the tapped time (the box is
-     pointer-transparent so the staff tap handler reads the exact position) */
-  if (S.gapRestMode) {
-    const tx = X(totalDur), tw = svgW - PAD_R - tx;
-    if (tw > 14) {
-      svg.append(svgEl("rect", { x: tx + 1, y: PAD_T + 6, width: tw - 2, height: STAFF_H - PAD_T - PAD_B - 12,
-        fill: "rgba(0,0,0,0.02)", stroke: "#bbb", "stroke-width": 1.2, "stroke-dasharray": "3 6", rx: 4,
-        "pointer-events": "none" }));
-      svg.append(svgEl("text", { x: tx + 8, y: PAD_T + 20, "text-anchor": "start",
-        "font-size": 9.5, fill: "#999", "pointer-events": "none" },
-        totalDur > 0 ? "⌷ trailing rest — tap where it should end" : "⌷ tap where the opening rest should end"));
+
+  /* time slider: a draggable ▲ along the staff bottom; released, it plants a
+     thin red line through the whole staff; a plain tap on ▲ hides the line */
+  {
+    const tx = X(Math.max(0, TMARK.t));
+    if (TMARK.on) {
+      svg.append(svgEl("line", { id: "tmLine", x1: tx, x2: tx, y1: PAD_T - 6, y2: STAFF_H - PAD_B + 6,
+        stroke: "#c62828", "stroke-width": 1.2, "pointer-events": "none" }));
+      svg.append(svgEl("text", { id: "tmTime", x: tx + 3, y: PAD_T - 8, "font-size": 9,
+        "font-weight": 700, fill: "#c62828", "pointer-events": "none" }, `${fmt(TMARK.t)} s`));
     }
+    const tri = svgEl("path", { id: "tmTri",
+      d: `M ${tx} ${STAFF_H - PAD_B + 3} l -7 10 l 14 0 z`,
+      fill: TMARK.on ? "#c62828" : "#888", stroke: "#000", "stroke-width": 0.8, "data-ev": "" });
+    tri.style.cursor = "ew-resize";
+    tri.addEventListener("pointerdown", e => {
+      if (S.playing) return;
+      e.stopPropagation();
+      try { tri.setPointerCapture(e.pointerId); } catch (err) {}
+      tmDrag = { id: e.pointerId, x0: e.clientX, t0: TMARK.t, moved: false };
+    });
+    svg.append(tri);
+    const lbl = svgEl("text", { id: "tmLbl", x: tx, y: STAFF_H - PAD_B + 26, "text-anchor": "middle",
+      "font-size": 9.5, "font-weight": 700, fill: "#c62828", "pointer-events": "none",
+      visibility: "hidden" }, "");
+    svg.append(lbl);
   }
 
   /* Pattern Composer overlays: reference patterns drawn behind the draft's own
@@ -5117,6 +5084,85 @@ function pcompPlayAll() {
   if (ctx.state === "suspended") { try { ctx.resume().then(doPlay).catch(doPlay); } catch (e) { doPlay(); } }
   else doPlay();
 }
+function pcompRackList() {
+  try { return JSON.parse(localStorage.getItem("toneComposerV2.pcompRacks") || "[]") || []; }
+  catch (e) { return []; }
+}
+function pcompRackStoreAll(list) {
+  try { localStorage.setItem("toneComposerV2.pcompRacks", JSON.stringify(list)); } catch (e) {}
+}
+function pcompRackSave(name) {
+  const pats = S.pcomp.map(x => patById(x.pid)).filter(Boolean)
+    .map(p => ({ ...p, events: p.events.map(e => ({ ...e, midis: e.midis ? [...e.midis] : undefined })) }));
+  const list = pcompRackList().filter(r => r.name !== name);
+  list.push({ name, savedAt: Date.now(), pcomp: S.pcomp.map(x => ({ ...x })), patterns: pats });
+  pcompRackStoreAll(list);
+}
+function pcompRackLoad(name) {
+  const r = pcompRackList().find(q => q.name === name);
+  if (!r) return false;
+  (r.patterns || []).forEach(p => {
+    if (!patById(p.pid)) S.patterns.push({ ...p, events: p.events.map(e => ({ ...e, midis: e.midis ? [...e.midis] : undefined })) });
+  });
+  patStore();
+  S.pcomp = (r.pcomp || []).map(pcompNorm).filter(x => patById(x.pid));
+  pcompStore();
+  return true;
+}
+function openPcompSaveLoad() {
+  const body = document.createElement("div");
+  const r1 = document.createElement("div"); r1.className = "mline";
+  const nin = document.createElement("input");
+  nin.type = "text"; nin.placeholder = "rack name"; nin.maxLength = 24; nin.style.width = "130px";
+  const sv = document.createElement("button");
+  sv.className = "btn active"; sv.textContent = "💾 Save";
+  sv.addEventListener("click", () => {
+    const v = String(nin.value).trim();
+    if (!v) { flash("Give the rack a name first."); return; }
+    if (!S.pcomp.length) { flash("The rack is empty."); return; }
+    pcompRackSave(v);
+    closeModal();
+    flash(`Rack "${v}" saved (${S.pcomp.length} pattern${S.pcomp.length === 1 ? "" : "s"}, definitions included).`);
+    renderAll();
+  });
+  r1.append(nin, sv);
+  body.append(r1);
+  const list = pcompRackList();
+  if (list.length) {
+    const head = document.createElement("div");
+    head.style.cssText = "font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#666;margin-top:6px";
+    head.textContent = "Saved racks";
+    body.append(head);
+    list.sort((a, b) => b.savedAt - a.savedAt).forEach(r => {
+      const row = document.createElement("div"); row.className = "mline";
+      const nm = document.createElement("span");
+      nm.style.cssText = "font-size:13px;min-width:120px";
+      nm.textContent = `${r.name} (${(r.pcomp || []).length})`;
+      const ld = document.createElement("button");
+      ld.className = "btn small"; ld.textContent = "Load";
+      ld.addEventListener("click", () => {
+        if (pcompRackLoad(r.name)) { closeModal(); flash(`Rack "${r.name}" loaded.`); renderAll(); }
+      });
+      let armDel = false;
+      const dl = document.createElement("button");
+      dl.className = "btn small"; dl.textContent = "🗑";
+      dl.addEventListener("click", () => {
+        if (!armDel) { armDel = true; dl.textContent = "Really?"; return; }
+        pcompRackStoreAll(pcompRackList().filter(q => q.name !== r.name));
+        closeModal(); openPcompSaveLoad();
+      });
+      row.append(nm, ld, dl);
+      body.append(row);
+    });
+  }
+  const cl = document.createElement("div"); cl.className = "mline";
+  const cb = document.createElement("button");
+  cb.className = "btn"; cb.textContent = "Close";
+  cb.addEventListener("click", closeModal);
+  cl.append(cb);
+  body.append(cl);
+  showModal("Pattern Composer — save / load rack", body);
+}
 function openPcompAdd() {
   const body = document.createElement("div");
   const mk = (txt, cls, fn) => {
@@ -5448,14 +5494,14 @@ function renderPcomp() {
   master.className = "pcMeta";
   master.style.cssText = "font-weight:700;font-variant-numeric:tabular-nums;text-align:center";
   master.textContent = "⏱ 0.000";
-  ctr.append(mkc("▶ All", pcompPlayAll, "active"), mkc("■ Stop", patPreviewStop), master, mkc("Close", pcompClose));
+  ctr.append(mkc("▶ All", pcompPlayAll, "active"), mkc("■ Stop", patPreviewStop), master,
+    mkc("💾 Save / Load", openPcompSaveLoad), mkc("Close", pcompClose));
   strip.append(ctr);
 }
 
 /* ── Quick Tools bay: a small floating, draggable palette of tool buttons ── */
 const QT_CATALOG = [
-  ["penMode", "✎", "Insert"], ["selMode", "▣", "Select"], ["selAll", "⛶", "Select all"],
-  ["grabMode", "✋", "Grab"],
+  ["penMode", "✎", "Insert"], ["selMode", "▣", "Select"], ["grabMode", "✋", "Grab"],
   ["dragMode", "↔", "Resize"], ["deleteMode", "🗑", "Delete"], ["timeAdjust", "⏱", "Adjust"],
   ["restMode", "𝄽", "Rest"], ["chordMode", "♯", "Chord+"], ["mergeMode", "🔗", "Merge"],
   ["loopMode", "⟲", "Loop"], ["colorMode", "🎨", "Color"], ["quantMode", "▦", "Quantize"],
@@ -5482,8 +5528,7 @@ function qtStore() {
   try { localStorage.setItem("toneComposerV2.qtools", JSON.stringify(QT)); } catch (e) {}
 }
 function qtArm(k) {
-  if (k === "selAll") selectAllCurrent();
-  else if (k === "chordMode") armMode("chordMode", ["timeAdjust", "stencilMode"]);
+  if (k === "chordMode") armMode("chordMode", ["timeAdjust", "stencilMode"]);
   else if (k === "timeAdjust") armMode("timeAdjust", ["chordMode"]);
   else if (k === "stencilMode") armMode("stencilMode", ["chordMode"]);
   else armMode(k);
@@ -5616,8 +5661,10 @@ function openQtAssign(focusSlot) {
 
 function renderStaffNav() {
   const el = $("staffNav");
-  el.style.display = "flex";
+  const show = !S.patEdit;
+  el.style.display = show ? "flex" : "none";
   el.replaceChildren();
+  if (!show) return;
   const n = S.bars.length;
   const nb = (txt, title, fn, dis) => {
     const b = document.createElement("button");
@@ -5626,38 +5673,31 @@ function renderStaffNav() {
     b.addEventListener("click", fn);
     el.append(b);
   };
-  if (!S.patEdit) {   /* bar navigation applies to the composition only */
-    const go = i => { S.barIdx = Math.max(0, Math.min(n - 1, i)); renderAll(); };
-    nb("⏮", "First bar", () => go(0), S.barIdx === 0);
-    nb("◀", "Previous bar", () => go(S.barIdx - 1), S.barIdx === 0);
-    const lab = document.createElement("span");
-    lab.className = "navLab";
-    lab.textContent = `Bar ${S.barIdx + 1} / ${n} · ♪ ${noteCount(bar())}`;
-    lab.title = "Notes in this bar — tones with the exact same start and duration count as one chord";
-    el.append(lab);
-    nb("▶", "Next bar", () => go(S.barIdx + 1), S.barIdx >= n - 1);
-    nb("⏭", "Last bar", () => go(n - 1), S.barIdx >= n - 1);
-    nb("⏭ End bar here", "Finish this bar at its current length and move to a fresh bar", endBar);
-    const sep = document.createElement("span");
-    sep.style.cssText = "width:8px";
-    el.append(sep);
-  }
-  /* zoom controls — available in the composition AND the Pattern Studio;
-     a two-finger pinch on the staff does the same thing continuously */
-  nb("⛶ Select all", "Enter Select mode and select every event on this staff",
-     selectAllCurrent, !bar().length);
-  nb("◧ Shrink", "Halve how long the notes LOOK — durations are unchanged (pinch the staff for fine control)",
-     () => { setHzoom(HZOOM / 2); renderAll(); }, HZOOM <= 0.125);
-  nb("◨ Magnify", "Double the appearance — durations are unchanged (pinch the staff for fine control)",
-     () => { setHzoom(HZOOM * 2); renderAll(); }, HZOOM >= 4);
-  if (Math.abs(HZOOM - 1) > 0.001) {
+  const go = i => { S.barIdx = Math.max(0, Math.min(n - 1, i)); renderAll(); };
+  nb("⏮", "First bar", () => go(0), S.barIdx === 0);
+  nb("◀", "Previous bar", () => go(S.barIdx - 1), S.barIdx === 0);
+  const lab = document.createElement("span");
+  lab.className = "navLab";
+  lab.textContent = `Bar ${S.barIdx + 1} / ${n} · ♪ ${noteCount(bar())}`;
+  lab.title = "Notes in this bar — tones with the exact same start and duration count as one chord";
+  el.append(lab);
+  nb("▶", "Next bar", () => go(S.barIdx + 1), S.barIdx >= n - 1);
+  nb("⏭", "Last bar", () => go(n - 1), S.barIdx >= n - 1);
+  nb("⏭ End bar here", "Finish this bar at its current length and move to a fresh bar", endBar);
+  const sep = document.createElement("span");
+  sep.style.cssText = "width:8px";
+  el.append(sep);
+  nb("◧ Shrink", "Halve how long the notes LOOK — durations are unchanged",
+     () => { setHzoom(Math.max(0.125, HZOOM / 2)); renderAll(); }, HZOOM <= 0.125);
+  nb("◨ Unshrink", "Double the appearance back toward the original",
+     () => { setHzoom(Math.min(1, HZOOM * 2)); renderAll(); }, HZOOM >= 1);
+  if (HZOOM < 1) {
     const zl = document.createElement("span");
     zl.className = "navLab";
     zl.style.minWidth = "38px";
-    zl.textContent = `×${Math.round(HZOOM * 100) / 100}`;
+    zl.textContent = `×${HZOOM}`;
     zl.title = "Appearance scale — durations are unchanged";
     el.append(zl);
-    nb("×1", "Reset the appearance scale to the original", () => { setHzoom(1); renderAll(); });
   }
 }
 function renderBank() {
@@ -6817,7 +6857,7 @@ function armMode(prop, keep) {
   keep = keep || [];
   /* defensive: no stale drag state can ever survive a tool change */
   drag = null; grab = null; gdrag = null; pgrab = null; staffPan = null;
-  marq = null;
+  marq = null; tmDrag = null;
   const mbx = document.getElementById("marqBox");
   if (mbx) mbx.remove();
   selClickSuppressUntil = 0;
@@ -6854,18 +6894,6 @@ $("loopBtn").addEventListener("click", () => armMode("loopMode"));
 $("colorBtn").addEventListener("click", () => armMode("colorMode"));
 $("quantBtn").addEventListener("click", () => armMode("quantMode"));
 $("selBtn").addEventListener("click", () => armMode("selMode"));
-/* one tap: enter Select mode and select every event on the current staff —
-   reachable from the Tools menu, the staff nav bar, the Quick Tools bay, and
-   the (desktop) toolbar; works on a composition bar and the Studio draft alike */
-function selectAllCurrent() {
-  if (!S.selMode) armMode("selMode");     /* arming clears prior selections */
-  const n = bar().length;
-  if (!n) { flash("Nothing to select — this staff has no events yet."); renderAll(); return; }
-  bar().forEach(e => S.groupSel.add(e.id));
-  flash(`Selected all ${n} event${n === 1 ? "" : "s"} on this staff. Use the panel's “All (bars…)” / “All (composition)” for wider scopes.`);
-  renderAll();
-}
-$("selAllBtn").addEventListener("click", selectAllCurrent);
 $("barSelBtn").addEventListener("click", () => {
   S.barSelMode = !S.barSelMode;
   if (!S.barSelMode) S.barSel.clear();
@@ -6946,11 +6974,29 @@ restPad.addEventListener("contextmenu", e => e.preventDefault());
    Vertical swipes stay native (page scroll); drag tools take precedence;
    moves under 10 px remain taps. */
 $("staff").addEventListener("pointerdown", e => {
-  if (S.dragMode || S.grabMode || S.selMode || drag || grab || gdrag || pgrab || pinch) return;
+  if (S.dragMode || S.grabMode || S.selMode || drag || grab || gdrag || pgrab) return;
   const frame = document.querySelector(".staffFrame");
   staffPan = { id: e.pointerId, x: e.clientX, sl: frame.scrollLeft, active: false, frame };
 }, { passive: true });
 window.addEventListener("pointermove", e => {
+  if (tmDrag && e.pointerId === tmDrag.id) {
+    const r = $("staff").getBoundingClientRect();
+    const t = Math.max(0, ($("staff") && (e.clientX - r.left - PAD_L) / lastPxPerSec) || 0);
+    if (!tmDrag.moved && Math.abs(e.clientX - tmDrag.x0) > 3) tmDrag.moved = true;
+    if (tmDrag.moved) {
+      tmDrag.t = t;
+      const tx = PAD_L + t * lastPxPerSec;
+      const tri = document.getElementById("tmTri");
+      if (tri) tri.setAttribute("d", `M ${tx} ${STAFF_H - PAD_B + 3} l -7 10 l 14 0 z`);
+      const lbl = document.getElementById("tmLbl");
+      if (lbl) {
+        lbl.setAttribute("x", tx);
+        lbl.setAttribute("visibility", "visible");
+        lbl.textContent = `${fmt(t)} s`;
+      }
+    }
+    return;
+  }
   /* window-level: the finger drifting off the staff mid-swipe must not
      freeze the pan (element-level listeners stop receiving those moves) */
   if (!staffPan || e.pointerId !== staffPan.id) return;
@@ -6961,6 +7007,7 @@ window.addEventListener("pointermove", e => {
 });
 window.addEventListener("pointerup", () => { staffPan = null; });
 window.addEventListener("pointercancel", () => {
+  tmDrag = null;
   staffPan = null;
   marq = null;
   const mbx = document.getElementById("marqBox");
@@ -6979,88 +7026,22 @@ function marqueeSelect(x0, y0, x1, y1) {
   const xs = t => PAD_L + t * lastPxPerSec;
   let added = 0;
   bar().forEach(ev => {
-    if (ev.type === "pattern") return;
+    if (ev.type !== "note" && ev.type !== "bass") return;
+    const ms = ev.type === "note" ? ev.midis : [ev.midi];
     const ex0 = xs(ev.start), ex1 = xs(ev.start + ev.dur);
-    let hit;
-    if (ev.type === "rest") {
-      /* rests span the staff's full height, so the box only needs to cross
-         their time span — this makes gap rests box-selectable like anything else */
-      hit = ex1 >= L && ex0 <= R;
-    } else {
-      const ms = ev.type === "note" ? ev.midis : [ev.midi];
-      hit = ms.some(m => {
-        /* out-of-window tones render clamped at the staff edge — the box must
-           test the position the user actually sees */
-        const y = Math.max(PAD_T + 4, Math.min(STAFF_H - PAD_B - 4, yOfMidi(m)));
-        return ex1 >= L && ex0 <= R && y + 5 >= Tp && y - 5 <= Bt;
-      });
-    }
+    const hit = ms.some(m => {
+      /* out-of-window tones render clamped at the staff edge — the box must
+         test the position the user actually sees */
+      const y = Math.max(PAD_T + 4, Math.min(STAFF_H - PAD_B - 4, yOfMidi(m)));
+      return ex1 >= L && ex0 <= R && y + 5 >= Tp && y - 5 <= Bt;
+    });
     if (hit && !S.groupSel.has(ev.id)) { S.groupSel.add(ev.id); added++; }
   });
   return added;
 }
-/* ── two-finger pinch on the staff: magnify the appearance in/out; moving both
-   fingers together pans. The time under the fingers' midpoint stays put, so
-   zooming feels anchored. Works identically in the composition and the
-   Pattern Studio, in every tool mode — a second finger cancels any marquee
-   or one-finger pan in progress. ── */
-let pinch = null;
-const pinchPts = new Map();
-const pinchFrameEl = document.querySelector(".staffFrame");
-pinchFrameEl.addEventListener("pointerdown", e => {
-  if (e.pointerType !== "touch") return;
-  pinchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  if (pinchPts.size === 2 && !drag && !grab && !gdrag && !pgrab) {
-    marq = null;
-    const mbx = document.getElementById("marqBox");
-    if (mbx) mbx.remove();
-    staffPan = null;
-    const [a, b2] = [...pinchPts.values()];
-    const r = pinchFrameEl.getBoundingClientRect();
-    const midX = (a.x + b2.x) / 2 - r.left;
-    pinch = {
-      d0: Math.max(20, Math.hypot(a.x - b2.x, a.y - b2.y)),
-      hz0: HZOOM,
-      t0: (pinchFrameEl.scrollLeft + midX - PAD_L) / Math.max(lastPxPerSec, 0.001),
-      raf: 0,
-    };
-  }
-}, { capture: true, passive: true });
-window.addEventListener("pointermove", e => {
-  if (!pinchPts.has(e.pointerId)) return;
-  pinchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  if (!pinch || pinchPts.size < 2) return;
-  const [a, b2] = [...pinchPts.values()];
-  setHzoom(pinch.hz0 * (Math.max(20, Math.hypot(a.x - b2.x, a.y - b2.y)) / pinch.d0));
-  if (!pinch.raf) pinch.raf = requestAnimationFrame(() => {
-    if (!pinch) return;
-    pinch.raf = 0;
-    renderStaff();               /* light redraw only — panels wait for release */
-    if (pinchPts.size < 2) return;
-    const [c, d2] = [...pinchPts.values()];
-    const r = pinchFrameEl.getBoundingClientRect();
-    const midX = (c.x + d2.x) / 2 - r.left;
-    pinchFrameEl.scrollLeft = pinch.t0 * lastPxPerSec + PAD_L - midX;
-  });
-});
-const pinchRelease = e => {
-  pinchPts.delete(e.pointerId);
-  if (pinch && pinchPts.size < 2) { pinch = null; renderAll(); }
-};
-window.addEventListener("pointerup", pinchRelease);
-window.addEventListener("pointercancel", pinchRelease);
-/* Safari: keep its native page pinch off the staff so ours can run */
-pinchFrameEl.addEventListener("gesturestart", e => e.preventDefault());
-
 $("staff").addEventListener("pointerdown", e => {
-  if (!S.selMode || S.playing || gdrag || grab || drag || pgrab || pinch) return;
-  if (e.target && e.target.dataset && e.target.dataset.ev !== undefined) {
-    /* notes/bass: tap/drag their own way. Rests span the full staff height,
-       so their interior must still act as open space for starting a box —
-       a SELECTED rest never reaches here (its own handler captures the drag) */
-    const f = findEv(+e.target.dataset.ev);
-    if (!f || f.ev.type !== "rest") return;
-  }
+  if (!S.selMode || S.playing || gdrag || grab || drag || pgrab) return;
+  if (e.target && e.target.dataset && e.target.dataset.ev !== undefined) return;  // shapes: tap/drag their own way
   const r = $("staff").getBoundingClientRect();
   marq = { id: e.pointerId, x0: e.clientX - r.left, y0: e.clientY - r.top, x1: 0, y1: 0, active: false };
 }, { passive: true });
@@ -7069,19 +7050,7 @@ window.addEventListener("pointermove", e => {
   if (gdrag) { marq = null; return; }
   const r = $("staff").getBoundingClientRect();
   marq.x1 = e.clientX - r.left; marq.y1 = e.clientY - r.top;
-  if (!marq.active && Math.hypot(marq.x1 - marq.x0, marq.y1 - marq.y0) > 10) {
-    /* notes already selected + a clearly horizontal swipe = the user wants to
-       SCROLL, not draw another box: hand the gesture to the staff pan. A
-       diagonal or vertical drag still rubber-bands (additive selection). */
-    const dx = Math.abs(marq.x1 - marq.x0), dy = Math.abs(marq.y1 - marq.y0);
-    if (S.groupSel.size && dx > dy * 1.5) {
-      const frame = document.querySelector(".staffFrame");
-      staffPan = { id: e.pointerId, x: e.clientX, sl: frame.scrollLeft, active: true, frame };
-      marq = null;
-      return;
-    }
-    marq.active = true;
-  }
+  if (!marq.active && Math.hypot(marq.x1 - marq.x0, marq.y1 - marq.y0) > 10) marq.active = true;
   if (!marq.active) return;
   let box = document.getElementById("marqBox");
   if (!box) {
@@ -7095,6 +7064,12 @@ window.addEventListener("pointermove", e => {
   box.setAttribute("height", Math.abs(marq.y1 - marq.y0));
 });
 window.addEventListener("pointerup", e => {
+  if (tmDrag && e.pointerId === tmDrag.id) {
+    const d = tmDrag; tmDrag = null;
+    tmRelease(d.moved ? d.t : TMARK.t, d.moved);
+    renderAll();
+    return;
+  }
   if (!marq || e.pointerId !== marq.id) return;
   const m2 = marq;
   marq = null;
@@ -7217,7 +7192,6 @@ function renderMenus() {
   }, { check: QT.open }), mSep());
   TOOL_MENU.forEach(([label, mode, keeps]) =>
     dt.append(mItem(label, () => armMode(mode, keeps), { check: !!S[mode] })));
-  dt.append(mSep(), mItem("⛶ Select all (this staff)", selectAllCurrent));
   /* MIDI */
   const dm = $("ddMIDI");
   dm.replaceChildren();
@@ -7280,15 +7254,6 @@ function renderMenus() {
       applySpacing();
       renderAll();
     }, { radio: S.spacing === key })));
-  dv.append(mSep(), mHead("Note display"));
-  [["Classic — length shows duration", "classic"], ["Round — uniform dots", "round"], ["Pill — uniform pills", "pill"]].forEach(([lab, key]) =>
-    dv.append(mItem(lab, () => {
-      setNoteStyle(key);
-      flash(key === "classic"
-        ? "Classic display — each note is drawn as long as its duration."
-        : `Uniform ${key} display — every note is one size; position and the labels carry the timing, and spacing auto-widens so entries never overlap.`);
-      renderAll();
-    }, { radio: NOTE_STYLE === key })));
   dv.append(mSep(), mHead("Theme"));
   [["Classic", "classic"], ["Gray / Yellow", "gy"]].forEach(([lab, key]) =>
     dv.append(mItem(lab, () => {
@@ -7482,11 +7447,10 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 42;
+const BUILD = 44;
 /* init */
 viewRangeInit();
 hzoomInit();
-noteStyleInit();
 qtInit();
 applySpacing();
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
