@@ -137,7 +137,10 @@
     padding: 2px 8px; font-variant-numeric: tabular-nums; }
 
   .staffFrame { overflow-x: auto; border: 1px solid #eee; border-radius: 6px; margin-bottom: 10px;
-    -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+    -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain;
+    display: flex; align-items: flex-start; }
+  #pitchGutter { position: sticky; left: 0; z-index: 6; flex: 0 0 auto;
+    box-shadow: 2px 0 4px rgba(0,0,0,0.10); }
   .staffFrame.studio { border: 2.5px dashed #1565c0; padding: 7px 9px; }
   #qtBay { position: fixed; z-index: 940; background: #fff; border: 2px solid #000; border-radius: 8px;
     padding: 4px; display: flex; gap: 3px; align-items: center; box-shadow: 0 3px 14px rgba(0,0,0,0.25);
@@ -501,7 +504,7 @@
       <div id="staffNav" style="display:none"></div>
       <div id="bankStrip" style="display:none"></div>
       <div id="gridWrap" style="display:none"></div>
-      <div class="staffFrame"><svg id="staff" style="display:block;background:#fff"></svg></div>
+      <div class="staffFrame"><svg id="pitchGutter" style="display:block"></svg><svg id="staff" style="display:block;background:#fff"></svg></div>
     </div>
     <div class="keysCol" id="keysCol">
       <div class="lbl" id="keysLbl">Melody — hold to record (C2–F7)</div>
@@ -594,7 +597,8 @@ const dName = m => (S.notation === "tonal" && keyUsesFlats(S.tonal.key))
   : midiName(m);
 
 /* staff geometry */
-const PAD_T = 28, PAD_B = 16, PAD_L = 50, PAD_R = 14, BASE_W = 660;
+const PAD_T = 28, PAD_B = 16, PAD_L = 10, PAD_R = 14, BASE_W = 660;
+const GUT_W = 46;    // sticky pitch-name gutter (its own svg, pinned while the staff scrolls)
 const STEP_BASE = 9;
 const SPACINGS = { default: 1, medium: 1.5, large: 2 };
 const SPACINGS_VALID = v => (v === "medium" || v === "large" || v === "default") ? v : null;
@@ -771,6 +775,28 @@ function ensureCtx() {
    from the nearest anchor. Falls back to the synth piano when no
    samples are loaded on this device.                               */
 const SAMPLE_DB = "toneComposerV2", SAMPLE_STORE = "samples";
+const LEGACY_BANK = "Piano 1";
+const sampKey = (bank, midi) => `${bank}\u0001${midi}`;
+function sampParseKey(k) {
+  if (typeof k === "number") return { bank: LEGACY_BANK, midi: k };   // pre-bank records
+  const str = String(k), i = str.indexOf("\u0001");
+  if (i < 0) return null;
+  const midi = parseInt(str.slice(i + 1), 10);
+  return Number.isFinite(midi) ? { bank: str.slice(0, i), midi } : null;
+}
+function banksFromKeys(keys) {
+  const m = new Map();
+  keys.forEach(k => {
+    const p = sampParseKey(k);
+    if (!p) return;
+    const e = m.get(p.bank) || { count: 0, lo: 999, hi: -1 };
+    e.count++; e.lo = Math.min(e.lo, p.midi); e.hi = Math.max(e.hi, p.midi);
+    m.set(p.bank, e);
+  });
+  return m;
+}
+let sampleBanksMeta = new Map();      // bank name -> {count, lo, hi}
+let activeBank = (() => { try { return localStorage.getItem("toneComposerV2.sampleBank") || null; } catch (e) { return null; } })();
 const sampleMap = new Map();          // anchor midi -> AudioBuffer
 let sampleAnchors = [];               // sorted anchor midis
 let sampleBytesTotal = 0;
@@ -799,6 +825,15 @@ async function sdbAll() {
     const st = tx.objectStore(SAMPLE_STORE);
     const keysReq = st.getAllKeys(), valsReq = st.getAll();
     tx.oncomplete = () => res(keysReq.result.map((k, i) => [k, valsReq.result[i]]));
+    tx.onerror = () => rej(tx.error);
+  });
+}
+async function sdbDel(key) {
+  const db = await sdb();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(SAMPLE_STORE, "readwrite");
+    tx.objectStore(SAMPLE_STORE).delete(key);
+    tx.oncomplete = () => res();
     tx.onerror = () => rej(tx.error);
   });
 }
@@ -842,22 +877,52 @@ function decoderCtx() {
 async function loadSamplesFromDB() {
   if (typeof indexedDB === "undefined") return;
   try {
-    const rows = await sdbAll();
+    let rows = await sdbAll();
     if (!rows.length) return;
-    const ctx = decoderCtx();
-    sampleMap.clear(); sampleBytesTotal = 0;
-    for (const [midi, rec] of rows) {
-      try {
-        const buf = await ctx.decodeAudioData(rec.bytes.slice(0));
-        sampleMap.set(midi, buf);
-        sampleBytesTotal += rec.bytes.byteLength;
-      } catch (e) {}
+    /* migrate pre-bank records (numeric keys) into the "Piano 1" bank */
+    const legacy = rows.filter(([k]) => typeof k === "number");
+    for (const [midi, rec] of legacy) {
+      try { await sdbPut(sampKey(LEGACY_BANK, midi), rec); await sdbDel(midi); } catch (e) {}
     }
-    rebuildAnchors();
-    if (sampleAnchors.length) flash(`Sampled piano ready — ${sampleAnchors.length} samples loaded.`);
+    if (legacy.length) rows = await sdbAll();
+    sampleBanksMeta = banksFromKeys(rows.map(([k]) => k));
+    if (!activeBank || !sampleBanksMeta.has(activeBank))
+      activeBank = sampleBanksMeta.keys().next().value || null;
+    await bankDecode(activeBank, rows);
+    if (sampleAnchors.length)
+      flash(`Sample bank "${activeBank}" ready — ${sampleAnchors.length} samples loaded.`);
   } catch (e) {}
 }
-async function importSampleFiles(files, statusEl) {
+async function bankDecode(name, rowsMaybe) {
+  /* decode ONE bank into RAM; everything else stays on disk (phone memory) */
+  sampleMap.clear(); rebuildAnchors(); sampleBytesTotal = 0;
+  if (!name) return;
+  const ctx = decoderCtx();
+  const rows = rowsMaybe || await sdbAll();
+  for (const [k, rec] of rows) {
+    const p = sampParseKey(k);
+    if (!p || p.bank !== name) continue;
+    try {
+      const buf = await ctx.decodeAudioData(rec.bytes.slice(0));
+      sampleMap.set(p.midi, buf);
+      sampleBytesTotal += rec.bytes.byteLength;
+    } catch (e) {}
+  }
+  rebuildAnchors();
+}
+async function bankActivate(name) {
+  if (!name) return;
+  activeBank = name;
+  try { localStorage.setItem("toneComposerV2.sampleBank", name); } catch (e) {}
+  sampleFellBack = false;
+  await bankDecode(name);
+  flash(sampleAnchors.length
+    ? `Bank "${name}" active — ${sampleAnchors.length} samples in memory.`
+    : `Bank "${name}" is empty — import files via Sampler….`);
+  renderAll();
+}
+async function importSampleFiles(files, statusEl, bank) {
+  bank = bank || activeBank || LEGACY_BANK;
   const ctx = decoderCtx();
   let ok = 0, skip = 0;
   for (const f of files) {
@@ -865,10 +930,16 @@ async function importSampleFiles(files, statusEl) {
     if (midi == null) { skip++; continue; }
     try {
       const bytes = await f.arrayBuffer();
-      const buf = await ctx.decodeAudioData(bytes.slice(0));
-      await sdbPut(midi, { name: f.name, bytes });
-      sampleMap.set(midi, buf);
-      sampleBytesTotal += bytes.byteLength;
+      const buf = await ctx.decodeAudioData(bytes.slice(0));   // decode validates the file
+      await sdbPut(sampKey(bank, midi), { name: f.name, bytes });
+      const e = sampleBanksMeta.get(bank) || { count: 0, lo: 999, hi: -1 };
+      e.count++; e.lo = Math.min(e.lo, midi); e.hi = Math.max(e.hi, midi);
+      sampleBanksMeta.set(bank, e);
+      if (bank === activeBank || !activeBank) {
+        if (!activeBank) { activeBank = bank; try { localStorage.setItem("toneComposerV2.sampleBank", bank); } catch (err) {} }
+        sampleMap.set(midi, buf);
+        sampleBytesTotal += bytes.byteLength;
+      }
       ok++;
       if (statusEl) statusEl.textContent = `Importing… ${ok} loaded`;
     } catch (e) { skip++; }
@@ -3386,13 +3457,13 @@ function renderStaff() {
     const y = yOfMidi(m), oct = OCTAVE_FS.includes(m), sh = isSharp(m);
     const T = TH();
     const line = svgEl("line", {
-      x1: PAD_L - 4, x2: svgW - PAD_R, y1: y, y2: y,
+      x1: 0, x2: svgW - PAD_R, y1: y, y2: y,
       stroke: oct ? T.lineOct : sh ? T.lineSharp : T.lineNat,
       "stroke-width": oct ? T.wOct : T.wNat,
     });
     if (sh && !oct) line.setAttribute("stroke-dasharray", "4 3");
     svg.append(line);
-    svg.append(svgEl("text", {
+    if (false) svg.append(svgEl("text", {
       x: PAD_L - 8, y: y + 3, "text-anchor": "end",
       "font-size": oct ? 10.5 : 8.5, "font-weight": oct ? 700 : 400,
       fill: oct ? T.labOct : sh ? T.labSharp : T.labNat,
@@ -5794,6 +5865,29 @@ function renderToolsBar() {
   sa.addEventListener("click", selectAllCurrent);
   el.append(sa);
 }
+function renderPitchGutter() {
+  const g = $("pitchGutter");
+  if (!g || !g.setAttribute) return;
+  const T = TH();
+  g.setAttribute("width", GUT_W);
+  g.setAttribute("height", STAFF_H);
+  g.style.background = T.sheet;
+  if (!g.replaceChildren) return;
+  g.replaceChildren();
+  for (let m = VIEW_LO; m <= VIEW_HI; m++) {
+    const y = yOfMidi(m), oct = OCTAVE_FS.includes(m), sh = isSharp(m);
+    const stub = svgEl("line", { x1: GUT_W - 7, x2: GUT_W, y1: y, y2: y,
+      stroke: oct ? T.lineOct : sh ? T.lineSharp : T.lineNat,
+      "stroke-width": oct ? T.wOct : T.wNat });
+    if (sh && !oct) stub.setAttribute("stroke-dasharray", "4 3");
+    g.append(stub);
+    g.append(svgEl("text", { x: GUT_W - 10, y: y + 3, "text-anchor": "end",
+      "font-size": oct ? 10.5 : 8.5, "font-weight": oct ? 700 : 400,
+      fill: oct ? T.labOct : sh ? T.labSharp : T.labNat }, dName(m)));
+  }
+  g.append(svgEl("line", { x1: GUT_W - 0.5, x2: GUT_W - 0.5, y1: 0, y2: STAFF_H,
+    stroke: T.lineOct, "stroke-width": 1 }));
+}
 function renderStaffNav() {
   const el = $("staffNav");
   el.style.display = "flex";
@@ -6740,7 +6834,7 @@ function renderControls() {
 
   $("themeBtn").textContent = "Theme: " + TH().label;
   $("voiceBtn").textContent = "Voice: " +
-    (S.voice === "piano" ? "Synth Piano" : S.voice === "sampled" ? "Sampled Piano" : "Sine");
+    (S.voice === "piano" ? "Synth Piano" : S.voice === "sampled" ? `Sampled: ${activeBank || "—"}` : "Sine");
   $("notationBtn").textContent = "Mode: " + (S.notation === "tonal" ? "Tonal" : "Atonal") + " ⇄";
   $("playAllBtn").disabled = !!S.holding;
   $("playBarBtn").disabled = S.playing || !!S.holding;
@@ -6858,7 +6952,7 @@ function renderSaved() {
 
 function renderAll() {
   renderControls(); renderBarNav(); renderStatus();
-  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderPcomp(); renderQtBay(); renderToolsBar(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
+  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderPcomp(); renderQtBay(); renderToolsBar(); renderPitchGutter(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
 }
 
 /* ─────────────── wiring ─────────────── */
@@ -6922,55 +7016,121 @@ $("samplerBtn").addEventListener("click", openSamplerModal);
 function openSamplerModal() {
   const body = document.createElement("div");
   body.className = "mrow";
+  const names = [...sampleBanksMeta.keys()];
+  let selBank = activeBank || names[0] || "";
+
   const status = document.createElement("div");
-  status.style.cssText = "font-size:12.5px";
+  status.style.cssText = "font-size:12.5px;min-height:17px";
   const refreshStatus = () => {
-    status.textContent = sampleAnchors.length
-      ? `${sampleAnchors.length} samples · ${dName(sampleAnchors[0])} – ${dName(sampleAnchors[sampleAnchors.length - 1])} · ${(sampleBytesTotal / 1048576).toFixed(1)} MB stored`
-      : "No samples loaded on this device yet.";
+    const m = sampleBanksMeta.get(selBank);
+    status.textContent = !selBank ? "No banks yet — name one below and import files into it."
+      : m ? `${selBank}: ${m.count} sample${m.count === 1 ? "" : "s"} · ${dName(m.lo)} – ${dName(m.hi)}` +
+            (selBank === activeBank ? ` · ACTIVE (${(sampleBytesTotal / 1048576).toFixed(1)} MB in memory)` : " · stored, not in memory")
+      : `${selBank}: empty — import files below.`;
   };
-  refreshStatus();
-  const line = document.createElement("div");
-  line.className = "mline";
+
+  const r1 = document.createElement("div");
+  r1.className = "mline";
+  const bsel = document.createElement("select");
+  bsel.className = "pitchSel";
+  const rebuildSel = () => {
+    bsel.replaceChildren();
+    [...sampleBanksMeta.keys()].forEach(n => {
+      const o = document.createElement("option");
+      o.value = n; o.textContent = n + (n === activeBank ? " (active)" : "");
+      if (n === selBank) o.selected = true;
+      bsel.append(o);
+    });
+  };
+  rebuildSel();
+  bsel.addEventListener("change", () => { selBank = bsel.value; refreshStatus(); });
+  const nin = document.createElement("input");
+  nin.type = "text"; nin.placeholder = "new bank name"; nin.maxLength = 20; nin.style.width = "110px";
+  const nb = document.createElement("button");
+  nb.className = "btn small"; nb.textContent = "＋ New bank";
+  nb.addEventListener("click", () => {
+    const v = String(nin.value).trim();
+    if (!v) { flash("Name the bank first (e.g. Strings, Harp)."); return; }
+    if (v.includes("\u0001")) { flash("That character is not allowed."); return; }
+    if (!sampleBanksMeta.has(v)) sampleBanksMeta.set(v, { count: 0, lo: 999, hi: -1 });
+    selBank = v; nin.value = "";
+    rebuildSel(); refreshStatus();
+  });
+  r1.append(bsel, nin, nb);
+
+  const r2 = document.createElement("div");
+  r2.className = "mline";
   const pick = document.createElement("button");
   pick.className = "btn active";
-  pick.textContent = "Import sample files…";
+  pick.textContent = "Import files into this bank…";
   const fin = document.createElement("input");
   fin.type = "file"; fin.multiple = true; fin.accept = "audio/*"; fin.style.display = "none";
-  pick.addEventListener("click", () => fin.click());
+  pick.addEventListener("click", () => {
+    if (!selBank) { flash("Create or pick a bank first."); return; }
+    fin.click();
+  });
   fin.addEventListener("change", async () => {
     if (!fin.files || !fin.files.length) return;
     pick.disabled = true;
-    const { ok, skip } = await importSampleFiles([...fin.files], status);
+    const { ok, skip } = await importSampleFiles([...fin.files], status, selBank);
     pick.disabled = false;
-    refreshStatus();
-    flash(`Imported ${ok} sample${ok === 1 ? "" : "s"}${skip ? ` (${skip} skipped — name must be like C4v8.mp3)` : ""}.`);
-    if (ok && S.voice === "sampled") previewTone(69, 1.0);
+    rebuildSel(); refreshStatus();
+    flash(`Imported ${ok} into "${selBank}"${skip ? ` (${skip} skipped — name files like C4v8.mp3)` : ""}.`);
+    if (ok && S.voice === "sampled" && selBank === activeBank) previewTone(69, 1.0);
+    renderAll();
     fin.value = "";
   });
-  const clr = document.createElement("button");
-  clr.className = "btn";
-  clr.textContent = "Clear samples";
-  clr.addEventListener("click", async () => {
-    try { await sdbClear(); } catch (e) {}
-    sampleMap.clear(); rebuildAnchors(); sampleBytesTotal = 0;
-    refreshStatus();
-    flash("Samples cleared from this device.");
+  const use = document.createElement("button");
+  use.className = "btn";
+  use.textContent = "Use this bank";
+  use.addEventListener("click", async () => {
+    if (!selBank) return;
+    S.voice = "sampled";
+    await bankActivate(selBank);
+    rebuildSel(); refreshStatus();
   });
   const test = document.createElement("button");
   test.className = "btn";
   test.textContent = "Test A4";
   test.addEventListener("click", () => previewTone(69, 1.2));
-  line.append(pick, clr, test);
+  let armDel = false;
+  const del = document.createElement("button");
+  del.className = "btn";
+  del.textContent = "Delete bank";
+  del.addEventListener("click", async () => {
+    if (!selBank) return;
+    if (!armDel) { armDel = true; del.textContent = `Really delete "${selBank}"?`; return; }
+    try {
+      const rows = await sdbAll();
+      for (const [k] of rows) {
+        const p = sampParseKey(k);
+        if (p && p.bank === selBank) await sdbDel(k);
+      }
+    } catch (e) {}
+    sampleBanksMeta.delete(selBank);
+    if (activeBank === selBank) {
+      activeBank = sampleBanksMeta.keys().next().value || null;
+      try { localStorage.setItem("toneComposerV2.sampleBank", activeBank || ""); } catch (e) {}
+      await bankDecode(activeBank);
+    }
+    selBank = activeBank || sampleBanksMeta.keys().next().value || "";
+    armDel = false; del.textContent = "Delete bank";
+    rebuildSel(); refreshStatus(); renderAll();
+    flash("Bank deleted from this device.");
+  });
+  r2.append(pick, use, test, del);
+
   const help = document.createElement("div");
   help.className = "note";
-  help.textContent = "Use the Salamander Grand Piano samples (Yamaha C5, CC BY 3.0 — credit: Alexander Holm). " +
-    "Download one velocity layer of the mp3/ogg set — Salamander anchors every minor third (A, C, D#, F# in each octave) — " +
-    "and import the files covering roughly C2–F7 (about 22 files, e.g. C2v8.mp3 … F#7v8.mp3). Filenames must keep the " +
-    "NoteOctave form (C4v8.mp3). Samples store in this browser only; import once per device. Playback pitch-shifts from " +
-    "the nearest sample, and soft strikes are gently darkened.";
-  body.append(status, line, help);
-  showModal("Sampled piano — sample manager", body);
+  help.textContent = "Each bank is one instrument; only the active bank is decoded into memory (good for phones — " +
+    "roughly 22 mono mp3s per bank). Filenames must keep the NoteOctave form (C4v8.mp3). Piano: Salamander Grand " +
+    "(CC BY 3.0 — credit Alexander Holm), one velocity layer, minor-third anchors, ~C2–F7. Other instruments: the " +
+    "tonejs-instruments sample packs (violin, cello, harp, flute… mostly CC0/CC-BY, drawn from VSCO 2 CE) are " +
+    "pre-trimmed to a few MB each. Plucked and struck sounds fit the strike-decay engine best; bowed sustains will " +
+    "clip to their sample length. Prefer mp3 — iPhones do not decode ogg. Samples store in this browser only.";
+  body.append(status, r1, r2, help);
+  refreshStatus();
+  showModal("Sample banks — one instrument per bank", body);
 }
 $("themeBtn").addEventListener("click", () => {
   S.theme = S.theme === "gy" ? "classic" : "gy";
@@ -7509,10 +7669,20 @@ function renderMenus() {
     dd.append(mItem(lab, () => { if (S.notation !== key) $("notationBtn").click(); },
       { radio: S.notation === key })));
   dd.append(mSep(), mHead("Voice"));
-  [["Sine", "sine"], ["Synth Piano", "piano"], ["Sampled Piano", "sampled"]].forEach(([lab, key]) =>
+  [["Sine", "sine"], ["Synth Piano", "piano"]].forEach(([lab, key]) =>
     dd.append(mItem(lab, () => {
       if (S.voice !== key) { S.voice = key; renderAll(); previewTone(69, 0.9); }
     }, { radio: S.voice === key })));
+  if (sampleBanksMeta.size) {
+    sampleBanksMeta.forEach((meta, name) =>
+      dd.append(mItem(`Sampled: ${name}`, () => {
+        S.voice = "sampled";
+        if (name !== activeBank) bankActivate(name).then(() => previewTone(69, 0.9));
+        else { renderAll(); previewTone(69, 0.9); }
+      }, { radio: S.voice === "sampled" && activeBank === name, hint: `${meta.count}` })));
+  } else {
+    dd.append(mItem("Sampled (no banks — Sampler…)", openSamplerModal, { radio: false }));
+  }
   dd.append(mSep(), mItem("Sampler…", openSamplerModal));
   /* Patterns */
   const dp = $("ddPatterns");
@@ -7718,7 +7888,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 46;
+const BUILD = 48;
 /* init */
 viewRangeInit();
 hzoomInit();
