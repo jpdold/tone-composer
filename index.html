@@ -141,6 +141,8 @@
     display: flex; align-items: flex-start; }
   #pitchGutter { position: sticky; left: 0; z-index: 6; flex: 0 0 auto;
     box-shadow: 2px 0 4px rgba(0,0,0,0.10); }
+  #staff { flex: 0 0 auto; }   /* flex items shrink by default — the staff must keep
+                                   its full width so the frame overflows and scrolls */
   .staffFrame.studio { border: 2.5px dashed #1565c0; padding: 7px 9px; }
   #qtBay { position: fixed; z-index: 940; background: #fff; border: 2px solid #000; border-radius: 8px;
     padding: 4px; display: flex; gap: 3px; align-items: center; box-shadow: 0 3px 14px rgba(0,0,0,0.25);
@@ -3746,15 +3748,23 @@ function renderStaff() {
     }
     const tri = svgEl("path", { id: "tmTri",
       d: `M ${tx} ${STAFF_H - PAD_B + 3} l -7 10 l 14 0 z`,
-      fill: TMARK.on ? "#c62828" : "#888", stroke: "#000", "stroke-width": 0.8, "data-ev": "" });
-    tri.style.cursor = "ew-resize";
-    tri.addEventListener("pointerdown", e => {
+      fill: TMARK.on ? "#c62828" : "#888", stroke: "#000", "stroke-width": 0.8,
+      "pointer-events": "none" });
+    svg.append(tri);
+    /* the finger target is a generous invisible pad that owns its touches
+       outright — the browser can never steal the drag for scrolling */
+    const hitW = 30, hitH = 22;
+    const hit = svgEl("rect", { id: "tmHit", x: tx - hitW / 2, y: STAFF_H - PAD_B + 1,
+      width: hitW, height: hitH, fill: "transparent", "data-ev": "" });
+    hit.style.cursor = "ew-resize";
+    hit.style.touchAction = "none";
+    hit.addEventListener("pointerdown", e => {
       if (S.playing) return;
       e.stopPropagation();
-      try { tri.setPointerCapture(e.pointerId); } catch (err) {}
+      try { hit.setPointerCapture(e.pointerId); } catch (err) {}
       tmDrag = { id: e.pointerId, x0: e.clientX, t0: TMARK.t, moved: false };
     });
-    svg.append(tri);
+    svg.append(hit);
     const lbl = svgEl("text", { id: "tmLbl", x: tx, y: STAFF_H - PAD_B + 26, "text-anchor": "middle",
       "font-size": 9.5, "font-weight": 700, fill: "#c62828", "pointer-events": "none",
       visibility: "hidden" }, "");
@@ -7280,7 +7290,8 @@ restPad.addEventListener("contextmenu", e => e.preventDefault());
    Vertical swipes stay native (page scroll); drag tools take precedence;
    moves under 10 px remain taps. */
 $("staff").addEventListener("pointerdown", e => {
-  if (S.dragMode || S.grabMode || S.selMode || drag || grab || gdrag || pgrab || pinch) return;
+  if (S.dragMode || S.grabMode || S.selMode || drag || grab || gdrag || pgrab || pinch || tmDrag) return;
+  if (e.target && e.target.id === "tmHit") return;
   const frame = document.querySelector(".staffFrame");
   staffPan = { id: e.pointerId, x: e.clientX, sl: frame.scrollLeft, active: false, frame };
 }, { passive: true });
@@ -7294,6 +7305,8 @@ window.addEventListener("pointermove", e => {
       const tx = PAD_L + t * lastPxPerSec;
       const tri = document.getElementById("tmTri");
       if (tri) tri.setAttribute("d", `M ${tx} ${STAFF_H - PAD_B + 3} l -7 10 l 14 0 z`);
+      const hit2 = document.getElementById("tmHit");
+      if (hit2) hit2.setAttribute("x", tx - 15);
       const lbl = document.getElementById("tmLbl");
       if (lbl) {
         lbl.setAttribute("x", tx);
@@ -7888,7 +7901,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 48;
+const BUILD = 49;
 /* init */
 viewRangeInit();
 hzoomInit();
