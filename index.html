@@ -3313,7 +3313,6 @@ function penInsert(clickX, clickY) {
   let dur = parseFloat(String($("penDur").value).trim().replace(",", "."));
   if (isNaN(dur) || dur < 0.01) dur = 0.5;
   let snapped = false;
-  if (!bar().length) { t = 0; snapped = t !== 0 ? snapped : snapped; }
   if (!S.penAnywhere) {
     /* a click above, below, or on an existing note WITHIN its duration is a
        chord: the new tone takes that note's exact start and duration.
@@ -3419,10 +3418,13 @@ function renderStaff() {
      width (falls back to BASE_W before first layout / on narrow screens) */
   const frame = document.querySelector(".staffFrame");
   const targetW = Math.max(BASE_W, (frame && frame.clientWidth ? frame.clientWidth : 0) - 4);
-  const fitPx = (targetW - PAD_L - PAD_R) / Math.max(totalDur, 2);
-  const needPx = minDur === Infinity ? 0 : MIN_EV_PX / minDur;
-  /* uniform note display: whatever the zoom, consecutive entries must sit at
-     least a glyph-width plus a margin apart so they never overlap or clutter */
+  /* STABLE TIME SCALE: pixels-per-second is a constant (times the user's
+     Shrink / Magnify / pinch factor), never derived from the content — so an
+     entry appears exactly where it was clicked and the view never rescales
+     underneath the user. */
+  const PX_BASE = 100;
+  /* uniform note display: consecutive entries must sit at least a glyph-width
+     apart, so tight rhythms can still raise the scale when glyphs would pile up */
   let uniPx = 0;
   if (NOTE_STYLE !== "classic") {
     const gw = NOTE_STYLES[NOTE_STYLE][0];
@@ -3433,12 +3435,12 @@ function renderStaff() {
     if (isFinite(minDelta) && minDelta > 0.0005) uniPx = Math.min((gw + UNI_MIN_GAP) / minDelta, 2000);
   }
   const pxPerSec = drag ? drag.pxPerSec : grab ? grab.pxPerSec : gdrag ? gdrag.px
-    : Math.max(Math.min(Math.max(fitPx, needPx), 400) * HZOOM, uniPx);
+    : Math.max(PX_BASE * HZOOM, uniPx);
   lastPxPerSec = pxPerSec;
-  /* entry runway: generous empty, clickable staff beyond the content so there
-     is always ample room to place the next notes (scrolls; swipe or drag) */
-  const runwaySec = Math.max(6, totalDur * 0.75);
-  const svgW = Math.max(targetW, PAD_L + PAD_R + (totalDur + runwaySec) * pxPerSec + 20);
+  /* entry runway: a CONSTANT strip of empty, clickable staff past the content —
+     the width grows only as the music actually approaches the edge */
+  const RUNWAY_PX = 340;
+  const svgW = Math.max(targetW, PAD_L + PAD_R + totalDur * pxPerSec + RUNWAY_PX);
   const X = t => PAD_L + t * pxPerSec;
 
   svg.setAttribute("width", svgW);
@@ -7901,7 +7903,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 49;
+const BUILD = 50;
 /* init */
 viewRangeInit();
 hzoomInit();
