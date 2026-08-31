@@ -3356,6 +3356,16 @@ function openTransposeModal() {
 
 /* trim unintended gaps between the selected notes only: each selected event is
    pulled left to begin exactly where the previous selected event stops */
+function selReconcile() {
+  const ids = groupAllIds();
+  if (!ids.length) { flash("Select some notes first."); return; }
+  pushUndo({ kind: "setdur", items: groupItemsSnapshot(ids) });
+  const evs = ids.map(id => findEv(id)).filter(f => f && f.bi === S.barIdx).map(f => f.ev)
+    .sort((a, b) => a.start - b.start || a.id - b.id);
+  packEvents(evs);
+  flash(`Reconciled ${evs.length} entries — chained start-on-stop from ${fmt(evs[0].start)} s, durations kept.`);
+  renderAll();
+}
 function selTrimGaps() {
   const GAP = 0;
   const ids = groupIds();
@@ -4639,6 +4649,7 @@ function renderSel() {
     mk("🔇 Mute selected", () => groupMute(true), !ids.length || !anyUnmuted),
     mk("🔊 Unmute selected", () => groupMute(false), !anyMuted),
     mk("⇥ Trim gaps", selTrimGaps, ids.length < 2),
+    mk("⇉ Reconcile", selReconcile, ids.length < 2),
     mk("♪± Transpose…", openTransposeModal, false),
     mk("⧉ Duplicate", dupGroup, !ids.length),
     mk("Clear selection", () => { S.groupSel.clear(); renderAll(); }, !ids.length));
@@ -8499,7 +8510,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 62;
+const BUILD = 63;
 /* init */
 viewRangeInit();
 hzoomInit();
