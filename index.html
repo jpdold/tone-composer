@@ -153,6 +153,15 @@
   #qtBay .qtChrome { width: 26px; height: 26px; font-size: 12px; }
   #qtBay .qtEmpty { opacity: 0.35; font-size: 18px; }
   body.theme-gy #qtBay { background: #6a6d71; border-color: #000; }
+  #instBay { position: fixed; z-index: 940; background: #fff; border: 2px solid #000; border-radius: 8px;
+    padding: 4px; display: flex; gap: 3px; align-items: center; box-shadow: 0 3px 14px rgba(0,0,0,0.25);
+    touch-action: none; user-select: none; left: 12px; top: 210px; }
+  #instBay.vert { flex-direction: column; align-items: stretch; }
+  #instBay .ibSlot { display: flex; flex-direction: column; align-items: stretch; gap: 1px; }
+  #instBay .ibSwatch { height: 5px; border-radius: 2px; }
+  #instBay .qtHandle { cursor: grab; font-size: 14px; color: #666; padding: 2px 4px; text-align: center; }
+  #instBay button { font-size: 11.5px; padding: 3px 7px; }
+  body.theme-gy #instBay { background: #6a6d71; }
   #pcompStrip { border: 2px solid #1565c0; border-radius: 8px; padding: 8px; margin: 2px 2px 10px;
     display: flex; gap: 8px; align-items: flex-start; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .pcTitle { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #1565c0;
@@ -416,11 +425,11 @@
         <button id="mergeBtn" class="btn" title="Select notes in this bar, then combine them into one chord (length of the lowest tone)">🔗 Merge</button>
         <button id="loopBtn" class="btn" title="Click a note to set the loop start, a later note to set the stop, then choose continuous or a repeat count">⟲ Loop</button>
         <button id="colorBtn" class="btn" title="Pick a color, then click notes/chords to color them; range rules color whole pitch spans">🎨 Color</button>
-        <button id="selBtn" class="btn" title="Select multiple notes: drag any of them to move the whole group, set durations together, or mute them">▣ Select</button>
+        <button id="selBtn" class="btn" title="Select multiple notes: drag up/down to transpose the group (time fixed), set durations together, or mute them">▣ Select</button>
         <button id="selAllBtn" class="btn" title="One tap: enter Select mode and select every event on this staff — works on a composition bar and on the Pattern Studio draft alike">⛶ Select all</button>
         <button id="stencilBtn" class="btn" title="Beat Stencil Overlay: set a tempo, pick a note value, and every click/MIDI key enters exactly that duration">◫ Stencil</button>
         <button id="trimBtn" class="btn" title="Remove extraneous time between bars — shifts each bar's events so the first starts at 0 s">⇤ Trim</button>
-        <button id="gapsBtn" class="btn" title="Close empty time left by deleted entries in this bar — events end up 0.002 s apart">⇥ Gaps</button>
+        <button id="gapsBtn" class="btn" title="Close empty time left by deleted entries in this bar — each event begins where the previous one stops">⇥ Gaps</button>
         <button id="clearBtn" class="btn">Clear</button>
       </div>
     </div>
@@ -687,6 +696,7 @@ const S = {
   stDur: "quarter", stDots: 0,     // stencil value + dot / double-dot
   stMidiLo: 36, stMidiHi: 101,     // declared MIDI-controller range
   stMarginPct: 0.22,               // quantized-entry margin (0.20–0.25)
+  stPitchFloor: 0.6,               // audio take: minimum share of frames agreeing on the pitch
   stChordMax: 7,                   // user-set max tones per stencil chord (auto-advances when reached)
   harmonyOn: false, harmonyT: null,// harmony entry point (vertical positioning bar)
   adoptArm: false,                 // next note click supplies its duration to the selection
@@ -767,7 +777,10 @@ function flash(m) {
 function pushUndo(a) { undoStack.push(a); if (undoStack.length > 100) undoStack.shift(); }
 
 function ensureCtx() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    try { audioCtx = new AC({ latencyHint: "interactive" }); } catch (e) { audioCtx = new AC(); }
+  }
   if (audioCtx.state === "suspended") { try { audioCtx.resume().catch(() => {}); } catch (e) {} }
   return audioCtx;
 }
@@ -850,6 +863,60 @@ async function sdbClear() {
 }
 function rebuildAnchors() {
   sampleAnchors = [...sampleMap.keys()].sort((a, b) => a - b);
+}
+function bankNameFromRelPath(p) {
+  /* "tonejs-instruments-master/samples/violin/Cs4.mp3" -> "violin" */
+  const parts = String(p).split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+  const dir = parts[parts.length - 2];
+  if (!dir || dir === "samples" || dir.startsWith(".")) return null;
+  return dir.length > 20 ? dir.slice(0, 20) : dir;
+}
+function instParse(inst) {
+  if (!inst) return null;
+  if (inst === "sine" || inst === "piano") return { kind: inst };
+  if (typeof inst === "string" && inst.startsWith("bank:")) return { kind: "sampled", bank: inst.slice(5) };
+  return null;
+}
+const INST_PALETTE = ["#1565c0","#c62828","#2e7d32","#6a1b9a","#ef6c00","#00838f","#ad1457","#4e342e","#9e9d24","#283593"];
+function instColor(inst) {
+  let h = 0;
+  for (const ch of String(inst)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return INST_PALETTE[h % INST_PALETTE.length];
+}
+function instShort(inst) {
+  const p = instParse(inst);
+  if (!p) return "";
+  const n = p.kind === "sine" ? "Sine" : p.kind === "piano" ? "Piano" : p.bank;
+  return n.length > 10 ? n.slice(0, 9) + "…" : n;
+}
+const bankCache = new Map();          // bank name -> { map, anchors } (beyond the active bank)
+const BANK_CACHE_MAX = 3;             // phone RAM guard for simultaneously decoded extra banks
+async function ensureBankLoaded(name) {
+  if (!name || name === activeBank || bankCache.has(name)) return;
+  if (typeof indexedDB === "undefined") return;
+  try {
+    const rows = await sdbAll();
+    const map = new Map();
+    const ctx = decoderCtx();
+    for (const [k, rec] of rows) {
+      const p = sampParseKey(k);
+      if (!p || p.bank !== name) continue;
+      try { map.set(p.midi, await ctx.decodeAudioData(rec.bytes.slice(0))); } catch (e) {}
+    }
+    const anchors = [...map.keys()].sort((a, b) => a - b);
+    if (bankCache.size >= BANK_CACHE_MAX) bankCache.delete(bankCache.keys().next().value);
+    bankCache.set(name, { map, anchors });
+  } catch (e) {}
+}
+function anchorIn(anchors, midi) {
+  if (!anchors.length) return null;
+  let best = anchors[0], bd = Math.abs(midi - best);
+  for (const a of anchors) {
+    const d = Math.abs(midi - a);
+    if (d < bd || (d === bd && a < best)) { best = a; bd = d; }
+  }
+  return best;
 }
 function nearestAnchor(midi) {
   if (!sampleAnchors.length) return null;
@@ -987,19 +1054,30 @@ function pianoPartials(midi, vel) {
   return parts;
 }
 /* returns { nodes, master, release(t) } — sustainDur is the damper point */
-function startVoice(ctx, midi, when, sustainDur, level, vel) {
+function startVoice(ctx, midi, when, sustainDur, level, vel, inst) {
   const master = ctx.createGain();
   master.gain.setValueAtTime(1, when);
   master.connect(ctx.destination);
   const nodes = [];
-  let effVoice = S.voice;
+  let effVoice = S.voice, effMap = sampleMap, effAnchors = sampleAnchors;
+  const ip = instParse(inst);
+  if (ip) {
+    effVoice = ip.kind;
+    if (ip.kind === "sampled") {
+      if (ip.bank !== activeBank) {
+        const c = bankCache.get(ip.bank);
+        if (c && c.anchors.length) { effMap = c.map; effAnchors = c.anchors; }
+        else effVoice = "piano";               // bank not in memory yet — honest fallback
+      }
+    }
+  }
   if (effVoice === "sampled") {
-    const anchor = nearestAnchor(midi);
+    const anchor = anchorIn(effAnchors, midi);
     if (anchor == null) {
       effVoice = "piano";
       if (!sampleFellBack) { sampleFellBack = true; flash("No samples loaded on this device — using the synth piano (see Sampler…)."); }
     } else {
-      const buf = sampleMap.get(anchor);
+      const buf = effMap.get(anchor);
       const src = ctx.createBufferSource();
       src.buffer = buf;
       src.playbackRate.value = Math.pow(2, (midi - anchor) / 12);
@@ -1096,7 +1174,7 @@ function ensureTick() {
   if (!uiTick) uiTick = setInterval(() => {
     if (holdInfo) S.elapsed = (performance.now() - holdStart) / 1000;
     renderStatus(); renderStaff();
-    if (!holdInfo) { clearInterval(uiTick); uiTick = null; }
+    if (!holdInfo && !midiHeld.size) { clearInterval(uiTick); uiTick = null; }
   }, 50);
 }
 
@@ -1132,7 +1210,7 @@ function endHold() {
   S.holding = null; S.elapsed = 0;
   if (dur >= 0.04) {
     const ev = info.kind === "note"
-      ? { id: idCounter++, type: "note", midis: [info.midi], start: r3(holdBarStart), dur }
+      ? { id: idCounter++, type: "note", midis: [info.midi], start: r3(holdBarStart), dur, ...(S.entryInst ? { inst: S.entryInst } : {}) }
       : { id: idCounter++, type: "rest", start: r3(holdBarStart), dur };
     S.bars[S.barIdx].push(ev);
     pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ev.id });
@@ -1180,6 +1258,7 @@ function chordAdd(ev, midi) {
   /* NEW: the chord tone is its OWN event, coinciding with the anchor — it can
      be selected, resized, reshaped, or deleted without touching the others */
   const ne = { id: idCounter++, type: "note", midis: [midi], start: ev.start, dur: ev.dur };
+  if (S.entryInst) ne.inst = S.entryInst; else if (ev.inst) ne.inst = ev.inst;
   if (ev.shape) ne.shape = ev.shape;
   S.bars[S.barIdx].push(ne);
   pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ne.id });
@@ -1485,6 +1564,39 @@ function showModal(title, bodyEl) {
 function closeModal() { $("modalOverlay").style.display = "none"; }
 $("modalOverlay").addEventListener("click", e => { if (e.target.id === "modalOverlay") closeModal(); });
 window.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+/* ── arrow keys on a selection: ← → duration ±0.10 s (Shift: 0.01, Alt: 0.001);
+      ↑ ↓ pitch ± a half step (Shift: an octave), durations untouched ── */
+function selKeyIds() {
+  const g = groupAllIds();
+  if (g.length) return g;
+  const st = stencilIds();
+  if (st.length) return st;
+  if (S.selectedId != null && findEv(S.selectedId)) return [S.selectedId];
+  return [];
+}
+window.addEventListener("keydown", e => {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) return;
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+  if ($("modalOverlay").style.display === "flex" || S.playing) return;
+  const ids = selKeyIds();
+  if (!ids.length) return;
+  e.preventDefault();
+  const evs = ids.map(id => findEv(id)).filter(Boolean).map(f => f.ev);
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    const step = e.altKey ? 0.001 : e.shiftKey ? 0.01 : 0.1;
+    const d = e.key === "ArrowRight" ? step : -step;
+    pushUndo({ kind: "setdur", items: groupItemsSnapshot(ids) });
+    evs.forEach(ev => { ev.dur = Math.max(0.01, r3(ev.dur + d)); });
+    flash(`${evs.length === 1 ? evLabel(evs[0]) : evs.length + " events"}: duration ${d > 0 ? "+" : "−"}${fmt(step)} s${evs.length === 1 ? ` → ${fmt(evs[0].dur)} s` : ""}.`);
+  } else {
+    const semis = (e.shiftKey ? 12 : 1) * (e.key === "ArrowUp" ? 1 : -1);
+    const res = transposeEvs(evs, semis);
+    if (!res.ok) { flash(res.msg); return; }
+    flash(`${res.n === 1 ? evLabel(evs[0]) : res.n + " events"} moved ${semis > 0 ? "up" : "down"} ${Math.abs(semis) === 12 ? "an octave" : "a half step"}.`);
+  }
+  renderAll();
+});
 
 /* ─────────────── playback ─────────────── */
 function stopPlayback() {
@@ -1497,12 +1609,12 @@ function stopPlayback() {
   S.playing = false; S.playTime = -1; S.playBarIdx = -1;
   renderAll();
 }
-function scheduleTone(ctx, t0, midi, start, durIn, vel, shape) {
+function scheduleTone(ctx, t0, midi, start, durIn, vel, shape, inst) {
   const dur = shape === "elongated"
     ? Math.max(durIn, 0.05)
     : Math.max(durIn - Math.min(0.04, durIn * 0.1), 0.05);
   const level = 0.2 * S.volume * (vel != null ? velGain(vel) : 1);
-  const h = startVoice(ctx, midi, t0 + start, dur, level, vel);
+  const h = startVoice(ctx, midi, t0 + start, dur, level, vel, inst);
   h.nodes.forEach(n => playNodes.push(n));
   if (playNodes.length > 900) playNodes.splice(0, 450);   // long continuous loops: shed finished nodes
 }
@@ -1570,7 +1682,7 @@ function scheduleWindow(ctx, t0, bi, ws, we, base) {
   S.bars[bi].forEach(ev => {
     if (ev.start >= ws && ev.start < we && !ev.muted) {
       const at = base + (ev.start - ws);
-      if (ev.type === "note") ev.midis.forEach(m => scheduleTone(ctx, t0, m, at, shapeDur(ev), ev.vel, ev.shape));
+      if (ev.type === "note") ev.midis.forEach(m => scheduleTone(ctx, t0, m, at, shapeDur(ev), ev.vel, ev.shape, ev.inst));
       else if (ev.type === "bass") scheduleTone(ctx, t0, ev.midi, at, ev.dur, ev.vel);
       else if (ev.type === "pattern") {
         const p = patById(ev.pid);
@@ -1597,7 +1709,27 @@ function scheduleWindow(ctx, t0, bi, ws, we, base) {
     }
   });
 }
+function instBanksNeeded() {
+  const need = new Set();
+  S.bars.forEach(b => b.forEach(e => {
+    const p = instParse(e.inst);
+    if (p && p.kind === "sampled" && p.bank !== activeBank && !bankCache.has(p.bank) && sampleBanksMeta.has(p.bank))
+      need.add(p.bank);
+  }));
+  return [...need];
+}
+let instWarming = false;
 function playSeq(barIndices) {
+  /* per-note instruments: decode any referenced banks before the clock starts */
+  const _need = instBanksNeeded();
+  if (_need.length && !instWarming) {
+    instWarming = true;
+    flash(`Loading instrument${_need.length > 1 ? "s" : ""}: ${_need.join(", ")}…`);
+    Promise.all(_need.map(ensureBankLoaded)).then(() => { instWarming = false; playSeq(barIndices); });
+    return;
+  }
+  instWarming = false;
+
   if (S.playing) { stopPlayback(); return; }
   stopLatch();
   midiPanic();
@@ -1657,9 +1789,9 @@ const playBar = () => playSeq([S.barIdx]);
 const playFrom = () => playSeq(S.bars.map((_, i) => i).filter(i => i >= S.barIdx));
 
 /* remove extraneous time between bars: shift each bar's events so its first event starts at 0 */
-/* close empty time between events in this bar (default spacing 0.002 s) */
+/* close empty time between events in this bar (back to back) */
 function closeGaps() {
-  const GAP = 0.002;
+  const GAP = 0;                       // back to back: each entry begins where its predecessor stops
   const b = [...bar()].sort((a, c) => a.start - c.start || a.id - c.id);
   if (b.length < 2) { flash("Need at least two events to close gaps."); return; }
   const items = groupItemsSnapshot(b.map(e => e.id));
@@ -1673,7 +1805,7 @@ function closeGaps() {
   }
   if (!changed) { flash("No gaps found in this bar."); return; }
   pushUndo({ kind: "setdur", items });
-  flash(`Closed ${changed} gap${changed === 1 ? "" : "s"} — events now ${GAP} s apart.`);
+  flash(`Closed ${changed} gap${changed === 1 ? "" : "s"} — events now begin exactly where the previous one stops.`);
   renderAll();
 }
 
@@ -1704,91 +1836,192 @@ function trimGaps() {
    Detected notes enter through the SAME pipeline as keys/MIDI: stencil
    entry uses the stencil value, Quantized β snaps the sung duration to
    the beat, plain mode records the literal duration. Monophonic. */
-const AUDIO_GATES = { high: 0.006, medium: 0.014, low: 0.030 };
-let aud = null;            // { stream, src, analyser, timer, buf }
-let vNote = null;          // { samples:[], startMs, peak, lowFrames }
-let vCand = null;          // { midi, frames }
+const AUDIO_GATES = { high: 0.6, medium: 1.0, low: 1.8 };   // multipliers on the adaptive noise floor
+let aud = null;            // { stream, src, hpf, analyser, timer, buf, floor, gate, calib:[], origin, cursorBase }
+let vNote = null;          // { fm:[], startT, peak, lowFrames, dipMin, dipped }
+let vCand = null;          // { midi, frames, t }
+let pitchHist = [];        // recent float-midi values for the median filter
+/* ── MPM (McLeod Pitch Method): normalized square difference, key-maximum
+   picking with a clarity threshold, parabolic interpolation. Far fewer octave
+   errors than plain autocorrelation; clarity doubles as a confidence score. */
 function detectPitch(buf, sr, gate) {
   const N = buf.length;
   let rms = 0;
   for (let i = 0; i < N; i++) rms += buf[i] * buf[i];
   rms = Math.sqrt(rms / N);
-  if (rms < gate) return { rms, f: -1 };
-  const c = new Float32Array(N);
-  for (let lag = 0; lag < N; lag++) {
-    let sum = 0;
-    for (let i = 0; i < N - lag; i++) sum += buf[i] * buf[i + lag];
-    c[lag] = sum;
+  if (rms < gate) return { rms, f: -1, clarity: 0 };
+  const x = buf;                                              // MPM runs unwindowed
+  const minLag = Math.max(2, Math.floor(sr / 1100)), maxLag = Math.min(N - 2, Math.floor(sr / 60));
+  const nsdf = new Float32Array(maxLag + 1);
+  const stride = N >= 2048 ? 2 : 1;                           // phone CPU budget; accuracy unaffected
+  for (let tau = minLag; tau <= maxLag; tau++) {
+    let acf = 0, m = 0;
+    for (let i = 0; i < N - tau; i += stride) { const p = x[i], q = x[i + tau]; acf += p * q; m += p * p + q * q; }
+    nsdf[tau] = m > 0 ? 2 * acf / m : 0;
   }
-  let d = 1;
-  while (d < N - 1 && c[d] > c[d + 1]) d++;
-  let maxpos = -1, maxval = -Infinity;
-  for (let i = d; i < N - 1; i++) if (c[i] > maxval) { maxval = c[i]; maxpos = i; }
-  if (maxpos <= 0 || maxval / c[0] < 0.5) return { rms, f: -1 };   // clarity gate
-  let T = maxpos;
-  const x1 = c[T - 1], x2 = c[T], x3 = c[T + 1];
-  const a = (x1 + x3 - 2 * x2) / 2, b = (x3 - x1) / 2;
-  if (a) T = T - b / (2 * a);
-  return { rms, f: sr / T };
+  /* key maxima between positive zero crossings */
+  const peaks = [];
+  let tau = minLag;
+  while (tau <= maxLag && nsdf[tau] > 0) tau++;                 // skip the initial positive lobe
+  while (tau <= maxLag) {
+    while (tau <= maxLag && nsdf[tau] <= 0) tau++;
+    let best = -1, bv = -Infinity;
+    while (tau <= maxLag && nsdf[tau] > 0) { if (nsdf[tau] > bv) { bv = nsdf[tau]; best = tau; } tau++; }
+    if (best > 0) peaks.push([best, bv]);
+  }
+  if (!peaks.length) return { rms, f: -1, clarity: 0 };
+  const top = Math.max(...peaks.map(p => p[1]));
+  const K = 0.87;                                              // voice-tuned clarity threshold
+  const pick = peaks.find(p => p[1] >= K * top);
+  if (!pick || pick[1] < 0.6) return { rms, f: -1, clarity: pick ? pick[1] : 0 };
+  let T = pick[0];
+  const y1 = nsdf[T - 1] || 0, y2 = nsdf[T], y3 = nsdf[T + 1] || 0;
+  const den = y1 + y3 - 2 * y2;
+  if (den < 0) T = T + (y1 - y3) / (2 * den);                 // parabolic refinement
+  return { rms, f: sr / T, clarity: pick[1] };
 }
-function audioCommit() {
+const median = arr => { const a = [...arr].sort((p, q) => p - q); const n = a.length; return n ? (n % 2 ? a[n >> 1] : (a[n / 2 - 1] + a[n / 2]) / 2) : 0; };
+function audioCommit(endT) {
   if (!vNote) return;
-  const durMs = performance.now() - vNote.startMs;
-  const samples = vNote.samples;
+  const n = vNote;
   vNote = null;
-  if (durMs < 80 || !samples.length) return;      // ignore blips
-  /* modal (most frequent) midi wins — robust against onset wobble */
-  const counts = {};
-  samples.forEach(m => { counts[m] = (counts[m] || 0) + 1; });
-  let midi = samples[0], best = 0;
-  Object.entries(counts).forEach(([m, n]) => { if (n > best) { best = n; midi = +m; } });
+  const durS = (endT != null ? endT : audioNow()) - n.startT;
+  if (durS < 0.06 || !n.fm.length) return;                    // blips
+  const fmid = median(n.fm);
+  const midi = Math.round(fmid);
   if (midi < MIDI_MIN || midi > MIDI_MAX) return;
-  const vel = S.midiVelOn ? r3(Math.min(1, Math.max(0.15, vNoteLastPeak * 5))) : null;
+  const agree = n.fm.filter(v => Math.round(v) === midi).length / n.fm.length;
+  const vel = S.midiVelOn ? r3(Math.min(1, Math.max(0.15, n.peak * 5))) : null;
   if (S.stencilMode && S.stEntry === "stencil") { stencilEnter(midi, vel != null ? vel : undefined); return; }
-  let dur = r3(Math.max(durMs / 1000, 0.05));
-  if (S.stencilMode && S.stEntry === "quant") dur = snapQuant(dur);
-  const ev = { id: idCounter++, type: "note", midis: [midi], start: r3(melodyCursor(bar())), dur };
+  const takeMode = S.stencilMode && S.stEntry === "quant";
+  const start = takeMode && aud && aud.origin != null
+    ? r3(Math.max(0, aud.cursorBase + (n.startT - aud.origin)))   // literal onset against the metronome origin
+    : r3(melodyCursor(bar()));
+  const ev = { id: idCounter++, type: "note", midis: [midi], start, dur: r3(Math.max(durS, 0.05)) };
+  if (S.entryInst) ev.inst = S.entryInst;
   if (vel != null) ev.vel = vel;
+  if (takeMode) { ev.pconf = r3(agree * Math.min(1, n.clarity)); ev.fmidi = r3(fmid); quantTake.push(ev.id); }
   S.bars[S.barIdx].push(ev);
   pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ev.id });
   renderAll();
 }
-let vNoteLastPeak = 0;
+let quantTake = [];      // event ids captured by the mic during a Quantized session
+let quantTakeBase = 0;   // bar time the metronome's beat one was anchored to
+function quantizeTake() {
+  const evs = quantTake.map(id => findEv(id)).filter(f => f && f.bi === S.barIdx).map(f => f.ev)
+    .sort((a, b) => a.start - b.start || a.id - b.id);
+  quantTake = [];
+  if (!evs.length) return { kept: 0, dropped: 0 };
+  const floor = S.stPitchFloor;
+  /* drift correction: a consistently flat/sharp singer is re-centred before rounding */
+  const offs = evs.filter(e => e.fmidi != null).map(e => e.fmidi - Math.round(e.fmidi));
+  const drift = offs.length ? median(offs) : 0;
+  evs.forEach(e => { if (e.fmidi != null) { const m = Math.round(e.fmidi - drift); if (m >= MIDI_MIN && m <= MIDI_MAX) e.midis = [m]; } });
+  const keep = evs.filter(e => e.pconf == null || e.pconf >= floor);
+  const drop = evs.filter(e => !keep.includes(e));
+  /* onset-grid quantization: attacks snap to the 16th grid, durations follow the gaps */
+  const q = qSec(), grid = q / 4;
+  const base = quantTakeBase;                 // beat one of the count-in, not the first attack
+  const items = groupItemsSnapshot(keep.map(e => e.id));
+  const snapped = keep.map(e => ({ e, on: r3(base + Math.round((e.start - base) / grid) * grid) }));
+  const finalKeep = [];
+  snapped.forEach((sn, i) => {
+    if (i > 0 && sn.on === snapped[i - 1].on) { drop.push(sn.e); return; }   // two attacks on one grid slot: keep the first
+    finalKeep.push(sn);
+  });
+  finalKeep.forEach((sn, i) => {
+    sn.e.start = sn.on;
+    const next = finalKeep[i + 1];
+    sn.e.dur = next ? r3(next.on - sn.on) : snapQuant(sn.e.dur);
+    if (sn.e.dur < grid - 0.0005) sn.e.dur = r3(grid);
+    delete sn.e.pconf; delete sn.e.fmidi;
+  });
+  if (drop.length) {
+    const bi = S.barIdx;
+    S.bars[bi] = S.bars[bi].filter(e => !drop.includes(e));
+    pushUndo({ kind: "delgroup", items: drop.map(ev => { delete ev.pconf; delete ev.fmidi; return { barIdx: bi, ev }; }) });
+  }
+  if (items.length) pushUndo({ kind: "setdur", items });
+  flash(`Take quantized: ${finalKeep.length} note${finalKeep.length === 1 ? "" : "s"} on the 16th grid at ♩=${S.stTempo}` +
+    (Math.abs(drift) >= 0.05 ? ` · tuning drift ${drift > 0 ? "+" : ""}${Math.round(drift * 100)} cents corrected` : "") +
+    (drop.length ? ` · ${drop.length} dropped (unstable / duplicate attack)` : "") + ". Undo reverses it.");
+  renderAll();
+  return { kept: finalKeep.length, dropped: drop.length, drift: r3(drift) };
+}
+function audioNow() { return audioCtx ? audioCtx.currentTime : performance.now() / 1000; }
+/* ── metronome: count-in plus a light click during the take ── */
+let metro = null;
+function metroClick(ctx, when, accent) {
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = "sine"; o.frequency.value = accent ? 1600 : 1100;
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.linearRampToValueAtTime((accent ? 0.35 : 0.2) * S.volume, when + 0.002);
+  g.gain.setTargetAtTime(0.0001, when + 0.01, 0.02);
+  o.connect(g).connect(ctx.destination);
+  o.start(when); o.stop(when + 0.12);
+}
+function metroStart(ctx, t0) {
+  metroStop();
+  const q = qSec(), beats = TS_BEATS[S.tonal.sig] || 4;
+  let k = 0;
+  const pump = () => {
+    while (t0 + k * q < ctx.currentTime + 1.2) { metroClick(ctx, t0 + k * q, k % beats === 0); k++; }
+  };
+  pump();
+  metro = setInterval(pump, 300);
+}
+function metroStop() { if (metro) { clearInterval(metro); metro = null; } }
 function audioTick() {
   if (!aud) return;
-  if (S.playing) { if (vNote) { vNote = null; } vCand = null; setVLive("paused during playback"); return; }
+  const nowT = audioNow();
+  if (S.playing) { if (vNote) vNote = null; vCand = null; setVLive("paused during playback"); return; }
   aud.analyser.getFloatTimeDomainData(aud.buf);
-  const gate = AUDIO_GATES[S.audioGate] || AUDIO_GATES.medium;
-  const { rms, f } = detectPitch(aud.buf, audioCtx.sampleRate, gate);
-  const midi = f > 0 ? Math.round(69 + 12 * Math.log2(f / 440)) : null;
+  /* adaptive noise floor: the first 300 ms calibrate; gate = floor × sensitivity, with hysteresis */
+  if (aud.calib) {
+    let r = 0; for (let i = 0; i < aud.buf.length; i++) r += aud.buf[i] * aud.buf[i];
+    aud.calib.push(Math.sqrt(r / aud.buf.length));
+    if (nowT - aud.startT < 0.3) { setVLive("calibrating noise floor…"); return; }
+    aud.floor = Math.max(0.0015, median(aud.calib) * 3);
+    aud.calib = null;
+  }
+  const mult = AUDIO_GATES[S.audioGate] || 1;
+  const gateOn = aud.floor * mult, gateOff = gateOn * 0.6;
+  const { rms, f, clarity } = detectPitch(aud.buf, audioCtx.sampleRate, vNote ? gateOff : gateOn);
+  const inCountIn = aud.origin != null && nowT < aud.origin;
+  let fm = f > 0 ? 69 + 12 * Math.log2(f / 440) : null;
+  if (fm != null) { pitchHist.push(fm); if (pitchHist.length > 5) pitchHist.shift(); fm = median(pitchHist); }
+  else pitchHist = [];
+  const midi = fm != null ? Math.round(fm) : null;
   const lvl = ` · lvl ${(rms * 100).toFixed(1)}`;
-  const gateHint = rms > 0.0005 && rms < gate ? " (below gate — raise Sensitivity to High)" : "";
+  if (inCountIn) { setVLive(`count-in… ${Math.ceil(aud.origin - nowT)}`); return; }
   if (vNote) {
-    vNoteLastPeak = Math.max(vNoteLastPeak, rms);
-    if (f < 0) {
+    vNote.peak = Math.max(vNote.peak, rms);
+    /* energy-based re-articulation: a clear dip then a rise = a repeated note */
+    if (rms < vNote.peak * 0.45) { vNote.dipped = true; vNote.dipMin = Math.min(vNote.dipMin, rms); }
+    if (vNote.dipped && rms > vNote.dipMin * 2.2 && rms > gateOn && midi != null) {
+      audioCommit(nowT);
+      vNote = { fm: [fm], startT: nowT, peak: rms, lowFrames: 0, dipMin: rms, dipped: false, clarity };
+    } else if (f < 0) {
       vNote.lowFrames++;
-      if (vNote.lowFrames >= 2) audioCommit();
+      if (vNote.lowFrames >= 3) audioCommit(nowT - 0.03);
     } else {
       vNote.lowFrames = 0;
-      const cur = vNote.samples[vNote.samples.length - 1];
+      const cur = Math.round(median(vNote.fm.slice(-4)));
       if (midi !== cur) {
         vNote.jump = (vNote.jump || 0) + 1;
-        if (vNote.jump >= 2) {              // re-articulation → split into a new note
-          audioCommit();
-          vCand = { midi, frames: 1 };
-        } else vNote.samples.push(cur);     // brief wobble: hold pitch
-      } else { vNote.jump = 0; vNote.samples.push(midi); }
+        if (vNote.jump >= 3) { audioCommit(nowT - 0.03); vCand = { midi, frames: 1, t: nowT }; }
+      } else { vNote.jump = 0; vNote.fm.push(fm); vNote.clarity = Math.max(vNote.clarity, clarity); }
     }
   } else if (midi != null) {
     if (vCand && vCand.midi === midi) vCand.frames++;
-    else vCand = { midi, frames: 1 };
-    if (vCand.frames >= 2) {                // stable onset → note begins
-      vNote = { samples: [midi], startMs: performance.now() - 80, peak: rms, lowFrames: 0 };
-      vNoteLastPeak = rms;
+    else vCand = { midi, frames: 1, t: nowT };
+    if (vCand.frames >= 2) {
+      vNote = { fm: [fm], startT: vCand.t, peak: rms, lowFrames: 0, dipMin: rms, dipped: false, clarity };
       vCand = null;
     }
   } else vCand = null;
-  setVLive((vNote ? `● ${dName(vNote.samples[vNote.samples.length - 1])}` : (midi != null ? dName(midi) : "listening…")) + lvl + gateHint);
+  setVLive((vNote ? `● ${dName(Math.round(median(vNote.fm)))}` : (midi != null ? dName(midi) : "listening…")) + lvl +
+    (rms > 0.0005 && rms < gateOn && !vNote ? " (below gate — raise Sensitivity)" : ""));
 }
 function setVLive(t) {
   const el = document.getElementById("vLive");
@@ -1801,7 +2034,10 @@ async function audioToggle() {
       try { clearInterval(aud.timer); aud.src.disconnect(); aud.stream.getTracks().forEach(tr => tr.stop()); } catch (e) {}
       aud = null;
     }
+    metroStop();
+    if (vNote) audioCommit();
     vNote = null; vCand = null;
+    if (quantTake.length) { quantizeTake(); return; }
     flash("Audio input off.");
     renderAll();
     return;
@@ -1817,12 +2053,27 @@ async function audioToggle() {
     });
     const ctx = ensureCtx();
     const src = ctx.createMediaStreamSource(stream);
+    const hpf = ctx.createBiquadFilter();
+    hpf.type = "highpass"; hpf.frequency.value = 80; hpf.Q.value = 0.7;   // rumble / handling noise out
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
-    src.connect(analyser);                   // analysis only — never to the speakers
-    aud = { stream, src, analyser, buf: new Float32Array(2048), timer: setInterval(audioTick, 40) };
+    src.connect(hpf).connect(analyser);      // analysis only — never to the speakers
+    const takeMode = S.stencilMode && S.stEntry === "quant";
+    const startT = ctx.currentTime;
+    let origin = null;
+    if (takeMode) {
+      /* two-bar count-in on the metronome; the take's grid is anchored to it */
+      const q = qSec(), beats = TS_BEATS[S.tonal.sig] || 4;
+      origin = startT + 0.35 + 2 * beats * q;
+      metroStart(ctx, startT + 0.35);
+    }
+    aud = { stream, src, hpf, analyser, buf: new Float32Array(2048), startT, calib: [], floor: 0.004,
+      origin, cursorBase: r3(melodyCursor(bar())), timer: setInterval(audioTick, 12) };
+    if (takeMode) quantTakeBase = aud.cursorBase;
+    pitchHist = [];
     S.audioOn = true;
-    flash("Audio input on — sing or play; detected notes enter at the cursor.");
+    flash(takeMode ? "Quantized take — two bars of count-in, then sing to the click. Stop quantizes the take."
+                   : "Audio input on — sing or play; detected notes enter at the cursor.");
     renderAll();
   } catch (e) {
     const name = e && e.name ? e.name : "";
@@ -1844,6 +2095,13 @@ async function audioToggle() {
    whose duration runs until the last of those keys is released. */
 const MIDI_SUPPORTED = typeof navigator !== "undefined" && !!navigator.requestMIDIAccess;
 const MIDI_GROUP_MS = 35;
+let midiRaf = 0;
+function midiRender(full) {           // one render per frame, however fast the passage
+  if (midiRaf) { if (full) midiRafFull = true; return; }
+  midiRafFull = !!full;
+  midiRaf = requestAnimationFrame(() => { midiRaf = 0; if (midiRafFull) renderAll(); else renderStaff(); });
+}
+let midiRafFull = false;
 /* strike-force → level curve: keeps quiet notes audible, loud strikes prominent */
 const velGain = v => 0.3 + 0.7 * Math.pow(Math.max(0, Math.min(1, v)), 1.2);
 let midiAccess = null;
@@ -1920,7 +2178,8 @@ function midiNoteOn(m, vel, ts) {
   const level = 0.2 * S.volume * (S.midiVelOn ? velGain(v) : 1);
   const voice = startVoice(ctx, m, ctx.currentTime, 999, level, S.midiVelOn ? v : 0.7);
   midiHeld.set(m, { group, voice });
-  renderStatus();
+  ensureTick();                        // live growing preview while the key is down
+  midiRender(false);
 }
 function midiNoteOff(m, ts) {
   const rec = midiHeld.get(m);
@@ -1939,13 +2198,14 @@ function midiNoteOff(m, ts) {
     let midis = [...group.keys].sort((a, b) => a - b);
     if (midis.length > MAX_TONES) { midis = midis.slice(0, MAX_TONES); flash(`Chord clamped to ${MAX_TONES} tones.`); }
     const ev = { id: idCounter++, type: "note", midis, start: group.startBar, dur };
+    if (S.entryInst) ev.inst = S.entryInst;
     if (S.midiVelOn && group.vels && group.vels.length)
       ev.vel = r3(group.vels.reduce((a, b) => a + b, 0) / group.vels.length);
     S.bars[S.barIdx].push(ev);
     pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ev.id });
   }
   if (midiHeld.size === 0) midiPhrase = null;
-  renderAll();
+  midiRender(true);
 }
 
 /* ─────────────── save / load (localStorage) ─────────────── */
@@ -2422,6 +2682,7 @@ function stencilEnter(midi, vel) {
   }
   const startT = (S.harmonyOn && S.harmonyT != null) ? S.harmonyT : melodyCursor(bar());
   const ev = { id: idCounter++, type: "note", midis: [midi], start: r3(startT), dur: d };
+  if (S.entryInst) ev.inst = S.entryInst;
   if (S.midiVelOn && vel != null) ev.vel = r3(vel);
   if (S.noteShape !== "regular") ev.shape = S.noteShape;
   S.bars[S.barIdx].push(ev);
@@ -2781,7 +3042,9 @@ function updateGroupVisuals() {
 }
 window.addEventListener("pointermove", e => {
   if (!gdrag) return;
-  const shift = e.ctrlKey ? 0 : Math.max(gdrag.shiftLo, (e.clientX - gdrag.startX) / gdrag.px);
+  /* Select-mode drag transposes ONLY: durations and start times stay fixed —
+     the group cannot slide in time. Free 2-D movement belongs to ✋ Grab. */
+  const shift = 0;
   const off = Math.max(gdrag.offLo, Math.min(-Math.round((e.clientY - gdrag.startY) / STEP), gdrag.offHi));
   if (Math.abs(e.clientX - gdrag.startX) + Math.abs(e.clientY - gdrag.startY) > 4) gdrag.moved = true;
   gdrag.ids.forEach(id => {
@@ -2793,8 +3056,7 @@ window.addEventListener("pointermove", e => {
   });
   updateGroupVisuals();
   const rct = $("staff").getBoundingClientRect();
-  showHoverAt(e.clientX - rct.left, e.clientY - rct.top,
-    `${e.ctrlKey ? "⏱🔒 " : ""}Δ${shift >= 0 ? "+" : ""}${fmt(shift)} s · ${off >= 0 ? "+" : ""}${off} st`);
+  showHoverAt(e.clientX - rct.left, e.clientY - rct.top, `${off >= 0 ? "+" : ""}${off} st`);
 });
 window.addEventListener("pointerup", () => {
   if (!gdrag) return;
@@ -3050,9 +3312,9 @@ function openTransposeModal() {
 }
 
 /* trim unintended gaps between the selected notes only: each selected event is
-   pulled left to follow the previous selected event at 0.002 s spacing */
+   pulled left to begin exactly where the previous selected event stops */
 function selTrimGaps() {
-  const GAP = 0.002;
+  const GAP = 0;
   const ids = groupIds();
   if (ids.length < 2) { flash("Select at least two notes to trim gaps between them."); return; }
   const evs = ids.map(id => findEv(id).ev).sort((a, b) => a.start - b.start || a.id - b.id);
@@ -3066,7 +3328,7 @@ function selTrimGaps() {
   }
   if (!changed) { flash("No gaps between the selected notes."); return; }
   pushUndo({ kind: "setdur", items });
-  flash(`Trimmed ${changed} gap${changed === 1 ? "" : "s"} within the selection (${GAP} s spacing).`);
+  flash(`Trimmed ${changed} gap${changed === 1 ? "" : "s"} within the selection — back to back.`);
   renderAll();
 }
 /* duplicate the selected group: copies keep all relative timing and land
@@ -3323,7 +3585,7 @@ function penInsert(clickX, clickY) {
        the seemingly empty space beyond it places the NEXT note instead. */
     const hostWin = e => NOTE_STYLE === "classic"
       ? evEnd(e) - 1e-9
-      : e.start + Math.max(NOTE_STYLES[NOTE_STYLE][0], 12) / lastPxPerSec;
+      : e.start + Math.min(e.dur, Math.max(NOTE_STYLES[NOTE_STYLE][0], 12) / lastPxPerSec) - 1e-9;
     const host = bar().filter(e => e.type === "note" && t >= e.start - 1e-9 && t < hostWin(e))
       .sort((a, b) => b.start - a.start)[0];
     if (host) {
@@ -3332,6 +3594,7 @@ function penInsert(clickX, clickY) {
         return;
       }
       const ce = { id: idCounter++, type: "note", midis: [midi], start: host.start, dur: host.dur };
+      if (S.entryInst) ce.inst = S.entryInst; else if (host.inst) ce.inst = host.inst;
       if (host.shape) ce.shape = host.shape;
       S.bars[S.barIdx].push(ce);
       pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ce.id });
@@ -3348,6 +3611,7 @@ function penInsert(clickX, clickY) {
     t = prevEnd;
   }
   const ev = { id: idCounter++, type: "note", midis: [midi], start: r3(t), dur: r3(dur) };
+  if (S.entryInst) ev.inst = S.entryInst;
   if (S.noteShape !== "regular") ev.shape = S.noteShape;
   S.bars[S.barIdx].push(ev);
   pushUndo({ kind: "addEvent", barIdx: S.barIdx, id: ev.id });
@@ -3628,6 +3892,10 @@ function renderStaff() {
     midis.forEach((m, ti) => {
       const below = m < VIEW_LO, above = m > VIEW_HI;
       const y = above ? PAD_T + 4 : below ? STAFF_H - PAD_B - 4 : yOfMidi(m);
+      if (ev.inst && !IB.color && ti === 0 && !above && !below) {
+        svg.append(svgEl("text", { x: x + 1, y: y - 7, "font-size": 7.5, fill: "#555",
+          "pointer-events": "none" }, instShort(ev.inst)));
+      }
       if (above || below) {
         svg.append(svgEl("text", { x: x + w / 2, y: above ? PAD_T - 2 : STAFF_H - PAD_B + 10,
           "text-anchor": "middle", "font-size": 9, "font-weight": 700, fill: "#c62828",
@@ -3636,7 +3904,8 @@ function renderStaff() {
       const merged = (S.mergeMode && S.mergeSel.has(ev.id)) || (S.quantMode && S.quantSel.has(ev.id)) ||
         (S.selMode && S.groupSel.has(ev.id)) || (S.stencilMode && S.stencilSel.has(ev.id));
       const cust = toneColor(ev, m);
-      const toneFill = merged ? "#777" : (cust || (isBass ? "#666" : TH().note));
+      const toneFill = merged ? "#777"
+        : (cust || (IB.color && ev.inst ? instColor(ev.inst) : (isBass ? "#666" : TH().note)));
       const mutedOp = ev.muted ? 0.28 : (isBass ? 0.9 : 1);
       const gh = uni ? NOTE_STYLES[NOTE_STYLE][1] : 8;
       const barShape = svgEl("rect", {
@@ -3707,6 +3976,18 @@ function renderStaff() {
         width: w, height: 8, rx: 4, fill: "#555", "pointer-events": "none" }));
   }
 
+  /* live MIDI: held keys draw growing bars from the strike instant — the
+     entry is visible at key-down, not just when the key comes up */
+  if (midiHeld.size) {
+    const nowW = performance.now();
+    midiHeld.forEach((rec, m) => {
+      const g = rec.group;
+      const wv = Math.max((nowW - g.startWall) / 1000 * pxPerSec, 6);
+      if (m >= VIEW_LO && m <= VIEW_HI)
+        svg.append(svgEl("rect", { x: X(g.startBar), y: yOfMidi(m) - 4, width: wv, height: 8, rx: 4,
+          fill: "#555", opacity: 0.85, "data-midilive": "1", "pointer-events": "none" }));
+    });
+  }
   /* playhead */
   if (S.playing && S.playBarIdx === S.barIdx && S.playTime >= 0) {
     svg.append(svgEl("line", { x1: X(S.playTime), x2: X(S.playTime),
@@ -4289,7 +4570,7 @@ function renderSel() {
   if (ids.length) {
     const hint = document.createElement("span");
     hint.style.cssText = "font-size:11px;color:#999";
-    hint.textContent = "drag any selected note to move the group (↔ time, ↕ transpose)";
+    hint.textContent = "drag any selected note up/down to transpose the group (time stays fixed — use ✋ Grab to move in time)";
     row1.append(hint);
   }
   el.append(row1);
@@ -5679,6 +5960,97 @@ function qtArm(k) {
   else armMode(k);
 }
 let qtDrag = null;
+/* ── Instrument Bay: floating palette of instruments; entries take the selected one ── */
+const IB = { open: false, x: 12, y: 210, vert: true, color: false };
+function ibInit() {
+  try {
+    const q = JSON.parse(localStorage.getItem("toneComposerV2.instBay") || "null");
+    if (q) { IB.open = !!q.open; IB.vert = q.vert !== false; IB.color = !!q.color;
+      if (Number.isFinite(+q.x)) IB.x = +q.x; if (Number.isFinite(+q.y)) IB.y = +q.y; }
+    const ei = localStorage.getItem("toneComposerV2.entryInst");
+    if (ei) S.entryInst = ei;
+  } catch (e) {}
+}
+function ibStore() {
+  try {
+    localStorage.setItem("toneComposerV2.instBay", JSON.stringify(IB));
+    localStorage.setItem("toneComposerV2.entryInst", S.entryInst || "");
+  } catch (e) {}
+}
+function instList() {
+  const out = [["", "Auto"], ["sine", "Sine"], ["piano", "Piano"]];
+  sampleBanksMeta.forEach((m, name) => out.push(["bank:" + name, name]));
+  return out;
+}
+let ibDrag = null;
+function renderInstBay() {
+  let el = $("instBay");
+  if (!IB.open) { if (el && el.parentNode) el.remove(); return; }
+  if (!el || !el.replaceChildren) {
+    if (!document.body || !document.body.append) return;
+    el = document.createElement("div");
+    el.id = "instBay";
+    document.body.append(el);
+    el.addEventListener("pointerdown", e => {
+      if (!e.target.classList.contains("qtHandle")) return;
+      try { el.setPointerCapture(e.pointerId); } catch (err) {}
+      ibDrag = { id: e.pointerId, dx: e.clientX - IB.x, dy: e.clientY - IB.y };
+    });
+    el.addEventListener("pointermove", e => {
+      if (!ibDrag || e.pointerId !== ibDrag.id) return;
+      IB.x = e.clientX - ibDrag.dx; IB.y = e.clientY - ibDrag.dy;
+      const r = el.getBoundingClientRect();
+      IB.x = Math.max(2, Math.min(window.innerWidth - r.width - 2, IB.x));
+      IB.y = Math.max(2, Math.min(window.innerHeight - r.height - 2, IB.y));
+      el.style.left = IB.x + "px"; el.style.top = IB.y + "px";
+    });
+    const end = e => { if (ibDrag && e.pointerId === ibDrag.id) { ibDrag = null; ibStore(); } };
+    el.addEventListener("pointerup", end);
+    el.addEventListener("pointercancel", end);
+  }
+  el.classList.toggle("vert", IB.vert);
+  el.replaceChildren();
+  const handle = document.createElement("span");
+  handle.className = "qtHandle"; handle.textContent = "⠿"; handle.title = "Drag to move";
+  el.append(handle);
+  instList().forEach(([id, name]) => {
+    const wrap = document.createElement("div");
+    wrap.className = "ibSlot";
+    const b = document.createElement("button");
+    b.className = "btn small" + ((S.entryInst || "") === id ? " active" : "");
+    b.textContent = name.length > 10 ? name.slice(0, 9) + "…" : name;
+    b.title = id === "" ? "Entries follow the Voice menu" : `New entries become ${name}`;
+    b.addEventListener("click", () => {
+      S.entryInst = id || null;
+      ibStore();
+      const p = instParse(S.entryInst);
+      if (p && p.kind === "sampled") ensureBankLoaded(p.bank);
+      renderAll();
+    });
+    wrap.append(b);
+    if (IB.color && id) {
+      const sw = document.createElement("div");
+      sw.className = "ibSwatch";
+      sw.style.background = instColor(id);
+      wrap.append(sw);
+    }
+    el.append(wrap);
+  });
+  const mode = document.createElement("button");
+  mode.className = "btn qtChrome";
+  mode.textContent = IB.color ? "🏷" : "🎨";
+  mode.title = IB.color ? "Show instrument names on notes" : "Color-code notes by instrument (hides the labels)";
+  mode.addEventListener("click", () => { IB.color = !IB.color; ibStore(); renderAll(); });
+  const orient = document.createElement("button");
+  orient.className = "btn qtChrome";
+  orient.textContent = IB.vert ? "⇄" : "⇅";
+  orient.addEventListener("click", () => { IB.vert = !IB.vert; ibStore(); renderAll(); });
+  const close = document.createElement("button");
+  close.className = "btn qtChrome"; close.textContent = "✕";
+  close.title = "Close (Tools menu reopens it)";
+  close.addEventListener("click", () => { IB.open = false; ibStore(); renderAll(); });
+  el.append(mode, orient, close);
+}
 function qtClamp() {
   const el = $("qtBay");
   if (!el) return;
@@ -5932,6 +6304,9 @@ function renderStaffNav() {
   }
   /* zoom controls — available in the composition AND the Pattern Studio;
      a two-finger pinch on the staff does the same thing continuously */
+  nb(S.audioOn ? "■ Stop mic" : "🎤 Record", S.audioOn ? "Stop the microphone (a Quantized take is then quantized)"
+     : "Record from the microphone — sung or played notes enter at the cursor", audioToggle);
+  if (S.audioOn) el.lastChild.classList.add("active");
   nb("⛶ Select all", "Enter Select mode and select every event on this staff",
      selectAllCurrent, !bar().length);
   nb("◧ Shrink", "Halve how long the notes LOOK — durations are unchanged (pinch the staff for fine control)",
@@ -6577,6 +6952,15 @@ function renderStencil() {
     mr.style.width = "80px";
     mr.addEventListener("input", () => { S.stMarginPct = +mr.value; ml.textContent = `margin ±${Math.round(S.stMarginPct * 100)}% (floor 20 ms)`; });
     r1.append(ml, mr);
+    const pl = document.createElement("span");
+    pl.style.cssText = "font-size:12px;color:#444;margin-left:8px";
+    pl.textContent = `pitch floor ${Math.round(S.stPitchFloor * 100)}%`;
+    const pr = document.createElement("input");
+    pr.type = "range"; pr.min = "0.4"; pr.max = "0.9"; pr.step = "0.05"; pr.value = S.stPitchFloor;
+    pr.style.width = "80px";
+    pr.title = "Mic takes: a sung note whose frames agree on its pitch less than this is dropped as unstable";
+    pr.addEventListener("input", () => { S.stPitchFloor = +pr.value; pl.textContent = `pitch floor ${Math.round(S.stPitchFloor * 100)}%`; });
+    r1.append(pl, pr);
   }
   el.append(r1);
 
@@ -6783,6 +7167,15 @@ function renderStatus() {
     live.id = "vLive";
     live.textContent = "listening…";
     l.append(document.createTextNode("🎤 "), live);
+    const stop = document.createElement("button");
+    stop.className = "btn small active";
+    stop.textContent = "■ Stop";
+    stop.style.marginLeft = "6px";
+    stop.title = S.stencilMode && S.stEntry === "quant"
+      ? "Stop recording — the take is then quantized against the beat grid and pitch floor"
+      : "Stop the microphone";
+    stop.addEventListener("click", audioToggle);
+    l.append(stop);
     el.append(l);
   }
   if (S.midiOn && midiHeld.size) {
@@ -6966,7 +7359,7 @@ function renderSaved() {
 
 function renderAll() {
   renderControls(); renderBarNav(); renderStatus();
-  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderPcomp(); renderQtBay(); renderToolsBar(); renderPitchGutter(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
+  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderPcomp(); renderQtBay(); renderInstBay(); renderToolsBar(); renderPitchGutter(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
 }
 
 /* ─────────────── wiring ─────────────── */
@@ -7133,6 +7526,43 @@ function openSamplerModal() {
     flash("Bank deleted from this device.");
   });
   r2.append(pick, use, test, del);
+
+  /* bulk: pick an unzipped samples folder — each subfolder becomes its own bank */
+  const r2b = document.createElement("div");
+  r2b.className = "mline";
+  const pickAll = document.createElement("button");
+  pickAll.className = "btn";
+  pickAll.textContent = "Import a whole samples folder…";
+  pickAll.title = "Choose the unzipped tonejs-instruments 'samples' folder — every instrument subfolder becomes a bank";
+  const finAll = document.createElement("input");
+  finAll.type = "file"; finAll.multiple = true; finAll.style.display = "none";
+  finAll.setAttribute("webkitdirectory", "");
+  pickAll.addEventListener("click", () => finAll.click());
+  finAll.addEventListener("change", async () => {
+    const files = [...(finAll.files || [])];
+    if (!files.length) return;
+    const groups = new Map();
+    files.forEach(fl => {
+      const bank = bankNameFromRelPath(fl.webkitRelativePath || fl.name);
+      if (!bank) return;
+      if (!groups.has(bank)) groups.set(bank, []);
+      groups.get(bank).push(fl);
+    });
+    if (!groups.size) { flash("No instrument subfolders found in that selection."); return; }
+    pickAll.disabled = true;
+    let totOk = 0, totSkip = 0, done = 0;
+    for (const [bank, fls] of groups) {
+      status.textContent = `Importing ${bank}… (${++done}/${groups.size})`;
+      const { ok, skip } = await importSampleFiles(fls, null, bank);
+      totOk += ok; totSkip += skip;
+    }
+    pickAll.disabled = false;
+    selBank = activeBank || [...sampleBanksMeta.keys()][0] || "";
+    rebuildSel(); refreshStatus(); renderAll();
+    flash(`Imported ${totOk} samples into ${groups.size} bank${groups.size === 1 ? "" : "s"}${totSkip ? ` (${totSkip} files skipped)` : ""}. The Instrument bay (Tools menu) lists them all.`);
+  });
+  r2b.append(pickAll, finAll);
+  body.append(r2b);
 
   const help = document.createElement("div");
   help.className = "note";
@@ -7591,6 +8021,12 @@ function renderMenus() {
   /* Tools */
   const dt = $("ddTools");
   dt.replaceChildren();
+  dt.append(mItem("Instrument bay", () => {
+    IB.open = !IB.open;
+    ibStore();
+    if (IB.open) flash("Instrument bay — pick an instrument; every entry you make becomes it. 🎨 switches names to color coding.");
+    renderAll();
+  }, { check: IB.open }));
   dt.append(mItem("Quick Tools bay", () => {
     QT.open = !QT.open;
     qtStore();
@@ -7837,6 +8273,7 @@ $("mDiag").addEventListener("click", () => {
     `bars: ${S.bars.length} (bar ${S.barIdx + 1}, ${bar().length} events)\n` +
     `patterns: ${S.patterns.length} committed · studio ${S.patEdit ? "OPEN" : "closed"}\n` +
     `playing: ${S.playing} paused: ${S.paused}\n` +
+    `audio latency: ${audioCtx ? `base ${Math.round((audioCtx.baseLatency || 0) * 1000)} ms · output ${Math.round((audioCtx.outputLatency || 0) * 1000)} ms` : "context not started yet"}\n` +
     `recent errors: ${errLog.length ? "\n  " + errLog.join("\n  ") : "none"}\n` +
     `tap trace: ${tapTrace.length ? "\n  " + tapTrace.join("\n  ") : "none yet"}`;
   const line = document.createElement("div");
@@ -7905,12 +8342,13 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 51;
+const BUILD = 59;
 /* init */
 viewRangeInit();
 hzoomInit();
 noteStyleInit();
 qtInit();
+ibInit();
 buildInstructions();
 applySpacing();
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
