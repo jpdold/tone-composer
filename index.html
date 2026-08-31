@@ -153,6 +153,13 @@
   #qtBay .qtChrome { width: 26px; height: 26px; font-size: 12px; }
   #qtBay .qtEmpty { opacity: 0.35; font-size: 18px; }
   body.theme-gy #qtBay { background: #6a6d71; border-color: #000; }
+  #durBay { position: fixed; z-index: 940; background: #fff; border: 2px solid #000; border-radius: 8px;
+    padding: 4px; display: flex; gap: 3px; align-items: center; box-shadow: 0 3px 14px rgba(0,0,0,0.25);
+    touch-action: none; user-select: none; left: 12px; top: 300px; }
+  #durBay.vert { flex-direction: column; }
+  #durBay .qtHandle { cursor: grab; font-size: 14px; color: #666; padding: 2px 4px; }
+  #durBay .dbCur { font-weight: 700; font-size: 12.5px; min-width: 44px; text-align: center; }
+  body.theme-gy #durBay { background: #6a6d71; }
   #instBay { position: fixed; z-index: 940; background: #fff; border: 2px solid #000; border-radius: 8px;
     padding: 4px; display: flex; gap: 3px; align-items: center; box-shadow: 0 3px 14px rgba(0,0,0,0.25);
     touch-action: none; user-select: none; left: 12px; top: 210px; }
@@ -686,7 +693,7 @@ const STORE_KEY = "toneComposerV2.compositions";
 const S = {
   bars: [[]], barIdx: 0,
   restMode: false, chordMode: false,
-  timeAdjust: false, adjField: "stop", adjInc: 0.01,
+  timeAdjust: false, adjField: "stop", adjInc: 0.01, adjSel: [],
   deleteMode: false, dragMode: false,
   grabMode: false, penMode: false, penAnywhere: false, mergeMode: false,
   loopMode: false, colorMode: false, quantMode: false, selMode: false, stencilMode: false,
@@ -2548,6 +2555,19 @@ function eventClicked(ev, clickX, clickY, toneMidi) {
   }
   if (S.chordMode && !S.timeAdjust) { chordAdd(ev, midiOfY(clickY)); return; }
   /* time-adjust scope: Chord+ on → whole chord; Chord+ off → just the clicked tone */
+  if (S.timeAdjust && S.selectedId != null && S.selectedId !== ev.id) {
+    const a = findEv(S.selectedId);
+    if (a && Math.abs(a.ev.dur - ev.dur) < 0.0005) {
+      const i = S.adjSel.indexOf(ev.id);
+      if (i >= 0) S.adjSel.splice(i, 1); else S.adjSel.push(ev.id);
+      flash(i >= 0 ? "Removed from the adjustment group." : `Added — ${S.adjSel.length + 1} events of ${fmt(ev.dur)} s adjust together.`);
+      renderAll();
+      return;
+    } else if (a) {
+      flash(`Only events of the same duration (${fmt(a.ev.dur)} s) can join this adjustment.`);
+      return;
+    }
+  }
   const wantMidi = (S.timeAdjust && !S.chordMode && ev.type === "note" &&
                     toneMidi != null && ev.midis.length > 1) ? toneMidi : null;
   if (S.selectedId === ev.id && S.selectedMidi === wantMidi) {
@@ -3658,12 +3678,18 @@ function adjustSelected(delta) {
       ev = nev;
     }
   }
-  const end = evEnd(ev);
-  let ok;
-  if (S.adjField === "start") ok = applyTiming(ev, ev.start + delta, end);
-  else if (S.adjField === "stop") ok = applyTiming(ev, ev.start, end + delta);
-  else ok = applyTiming(ev, ev.start + delta, end + delta);
-  if (ok) renderAll(); else { renderAdjust(); }
+  const targets = [ev, ...S.adjSel.map(id => findEv(id)).filter(q => q && q.bi === S.barIdx &&
+    Math.abs(q.ev.dur - ev.dur) < 0.0005).map(q => q.ev)];
+  let ok = true;
+  targets.forEach(t => {
+    const end = evEnd(t);
+    let r;
+    if (S.adjField === "start") r = applyTiming(t, t.start + delta, end);
+    else if (S.adjField === "stop") r = applyTiming(t, t.start, end + delta);
+    else r = applyTiming(t, t.start + delta, end + delta);
+    ok = ok && r;
+  });
+  if (ok) renderAll(); else renderAdjust();
 }
 
 function renderStaff() {
@@ -4218,7 +4244,9 @@ function renderAdjust() {
     const scope = ev.type === "note" && ev.midis.length > 1
       ? (S.selectedMidi != null ? ` — ${midiName(S.selectedMidi)} only (Chord+ off)` : " — entire chord")
       : "";
-    who.textContent = "Adjusting " + evLabel(ev) + scope;
+    S.adjSel = S.adjSel.filter(id => { const q = findEv(id); return q && q.bi === S.barIdx && Math.abs(q.ev.dur - ev.dur) < 0.0005; });
+    who.textContent = "Adjusting " + evLabel(ev) + scope +
+      (S.adjSel.length ? ` + ${S.adjSel.length} more (equal ${fmt(ev.dur)} s — tap notes to add/remove)` : " — tap equal-duration notes to adjust them together");
   }
   head.append(who);
   if (ev) {
@@ -5962,6 +5990,88 @@ function qtArm(k) {
 let qtDrag = null;
 /* ── Instrument Bay: floating palette of instruments; entries take the selected one ── */
 const IB = { open: false, x: 12, y: 210, vert: true, color: false };
+/* ── Duration palette: floating quick durations for the ✎ entry length ── */
+const DBAY = { open: false, x: 12, y: 300, vert: false, val: 0.5, step: 0.1 };
+function dbInit() {
+  try {
+    const q = JSON.parse(localStorage.getItem("toneComposerV2.durPal") || "null");
+    if (q) { DBAY.open = !!q.open; DBAY.vert = !!q.vert;
+      if (Number.isFinite(+q.x)) DBAY.x = +q.x; if (Number.isFinite(+q.y)) DBAY.y = +q.y;
+      if (+q.val > 0) DBAY.val = +q.val; if ([0.1, 0.01, 0.001].includes(+q.step)) DBAY.step = +q.step; }
+  } catch (e) {}
+}
+function dbStore() { try { localStorage.setItem("toneComposerV2.durPal", JSON.stringify(DBAY)); } catch (e) {} }
+function dbSet(v) {
+  DBAY.val = r3(Math.max(0.01, v));
+  const pd = $("penDur");
+  if (pd && "value" in pd) pd.value = fmt(DBAY.val);
+  dbStore();
+  renderDurBay();
+}
+let dbDrag = null;
+function renderDurBay() {
+  let el = $("durBay");
+  if (!DBAY.open) { if (el && el.parentNode) el.remove(); return; }
+  if (!el || !el.replaceChildren) {
+    if (!document.body || !document.body.append) return;
+    el = document.createElement("div");
+    el.id = "durBay";
+    document.body.append(el);
+    el.addEventListener("pointerdown", e => {
+      if (!e.target.classList.contains("qtHandle")) return;
+      try { el.setPointerCapture(e.pointerId); } catch (err) {}
+      dbDrag = { id: e.pointerId, dx: e.clientX - DBAY.x, dy: e.clientY - DBAY.y };
+    });
+    el.addEventListener("pointermove", e => {
+      if (!dbDrag || e.pointerId !== dbDrag.id) return;
+      DBAY.x = e.clientX - dbDrag.dx; DBAY.y = e.clientY - dbDrag.dy;
+      const r = el.getBoundingClientRect();
+      DBAY.x = Math.max(2, Math.min(window.innerWidth - r.width - 2, DBAY.x));
+      DBAY.y = Math.max(2, Math.min(window.innerHeight - r.height - 2, DBAY.y));
+      el.style.left = DBAY.x + "px"; el.style.top = DBAY.y + "px";
+    });
+    const end2 = e => { if (dbDrag && e.pointerId === dbDrag.id) { dbDrag = null; dbStore(); } };
+    el.addEventListener("pointerup", end2);
+    el.addEventListener("pointercancel", end2);
+  }
+  el.classList.toggle("vert", DBAY.vert);
+  el.replaceChildren();
+  const handle = document.createElement("span");
+  handle.className = "qtHandle"; handle.textContent = "⠿"; handle.title = "Drag to move";
+  el.append(handle);
+  [0.125, 0.25, 0.5, 0.75, 1.0].forEach(v => {
+    const b = document.createElement("button");
+    b.className = "btn small" + (Math.abs(DBAY.val - v) < 0.0005 ? " active" : "");
+    b.textContent = String(v);
+    b.title = `Entry duration ${fmt(v)} s`;
+    b.addEventListener("click", () => dbSet(v));
+    el.append(b);
+  });
+  const cur = document.createElement("span");
+  cur.className = "dbCur";
+  cur.textContent = fmt(DBAY.val);
+  cur.title = "The current ✎ entry duration";
+  const step = document.createElement("button");
+  step.className = "btn qtChrome";
+  step.style.width = "44px";
+  step.textContent = "±" + DBAY.step;
+  step.title = "Step size for − / + (tap to cycle 0.1 → 0.01 → 0.001)";
+  step.addEventListener("click", () => {
+    DBAY.step = DBAY.step === 0.1 ? 0.01 : DBAY.step === 0.01 ? 0.001 : 0.1;
+    dbStore(); renderDurBay();
+  });
+  const minus = document.createElement("button");
+  minus.className = "btn qtChrome"; minus.textContent = "−";
+  minus.addEventListener("click", () => dbSet(DBAY.val - DBAY.step));
+  const plus = document.createElement("button");
+  plus.className = "btn qtChrome"; plus.textContent = "＋";
+  plus.addEventListener("click", () => dbSet(DBAY.val + DBAY.step));
+  const close = document.createElement("button");
+  close.className = "btn qtChrome"; close.textContent = "✕";
+  close.title = "Close (Tools menu reopens it)";
+  close.addEventListener("click", () => { DBAY.open = false; dbStore(); renderDurBay(); });
+  el.append(cur, step, minus, plus, close);
+}
 function ibInit() {
   try {
     const q = JSON.parse(localStorage.getItem("toneComposerV2.instBay") || "null");
@@ -7359,7 +7469,7 @@ function renderSaved() {
 
 function renderAll() {
   renderControls(); renderBarNav(); renderStatus();
-  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderPcomp(); renderQtBay(); renderInstBay(); renderToolsBar(); renderPitchGutter(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
+  renderMenus(); renderBarGrid(); renderPatPanel(); renderTonal(); renderPcomp(); renderQtBay(); renderInstBay(); renderDurBay(); renderToolsBar(); renderPitchGutter(); renderStaffNav(); renderBank(); renderGridView(); renderStaff(); renderAdjust(); renderMerge(); renderLoop(); renderColor(); renderQuant(); renderSel(); renderStencil(); renderInspector(); renderChips(); renderKeys(false);
 }
 
 /* ─────────────── wiring ─────────────── */
@@ -8021,6 +8131,12 @@ function renderMenus() {
   /* Tools */
   const dt = $("ddTools");
   dt.replaceChildren();
+  dt.append(mItem("Duration palette", () => {
+    DBAY.open = !DBAY.open;
+    dbStore();
+    if (DBAY.open) { dbSet(DBAY.val); flash("Duration palette — tap a length for ✎ entry; − / + fine-tune it."); }
+    renderAll();
+  }, { check: DBAY.open }));
   dt.append(mItem("Instrument bay", () => {
     IB.open = !IB.open;
     ibStore();
@@ -8342,13 +8458,14 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 59;
+const BUILD = 60;
 /* init */
 viewRangeInit();
 hzoomInit();
 noteStyleInit();
 qtInit();
 ibInit();
+dbInit();
 buildInstructions();
 applySpacing();
 $("copyLine").textContent = `Sine Tone Composer © 2026 · build ${BUILD}`;
