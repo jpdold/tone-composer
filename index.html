@@ -1595,6 +1595,7 @@ window.addEventListener("keydown", e => {
     const d = e.key === "ArrowRight" ? step : -step;
     pushUndo({ kind: "setdur", items: groupItemsSnapshot(ids) });
     evs.forEach(ev => { ev.dur = Math.max(0.01, r3(ev.dur + d)); });
+    packEvents(evs);
     flash(`${evs.length === 1 ? evLabel(evs[0]) : evs.length + " events"}: duration ${d > 0 ? "+" : "−"}${fmt(step)} s${evs.length === 1 ? ` → ${fmt(evs[0].dur)} s` : ""}.`);
   } else {
     const semis = (e.shiftKey ? 12 : 1) * (e.key === "ArrowUp" ? 1 : -1);
@@ -3149,20 +3150,42 @@ function openSelectBarsModal() {
   body.append(line, err);
   showModal("Select all (bars…)", body);
 }
+function packEvents(evs) {
+  /* the follow rule: within this set, each note begins where the previous one
+     stops; events that struck together (chords) stay stacked on one slot */
+  const slots = new Map();
+  evs.forEach(e => {
+    const k = Math.round(e.start * 1000);
+    if (!slots.has(k)) slots.set(k, []);
+    slots.get(k).push(e);
+  });
+  const order = [...slots.keys()].sort((a, b) => a - b);
+  if (!order.length) return;
+  let t = order[0] / 1000;
+  order.forEach(k => {
+    const group = slots.get(k);
+    group.forEach(e => { e.start = r3(t); });
+    t = r3(t + Math.max(...group.map(e => e.dur)));
+  });
+}
 function groupSetDur(newDur) {
   const ids = groupAllIds();
   if (!ids.length) { flash("Select some notes first."); return; }
   const d = Math.max(0.01, r3(newDur));
   pushUndo({ kind: "setdur", items: groupItemsSnapshot(ids) });
-  ids.forEach(id => { const f = findEv(id); if (f) f.ev.dur = d; });
-  flash(`Set ${ids.length} duration${ids.length === 1 ? "" : "s"} to ${fmt(d)} s.`);
+  const evs = ids.map(id => findEv(id)).filter(f => f && f.bi === S.barIdx).map(f => f.ev);
+  evs.forEach(e => { e.dur = d; });
+  packEvents(evs);
+  flash(`Set ${ids.length} duration${ids.length === 1 ? "" : "s"} to ${fmt(d)} s — the run re-packed back to back.`);
   renderAll();
 }
 function groupStepDur(delta) {
   const ids = groupAllIds();
   if (!ids.length) { flash("Select some notes first."); return; }
   pushUndo({ kind: "setdur", items: groupItemsSnapshot(ids) });
-  ids.forEach(id => { const f = findEv(id); if (f) f.ev.dur = Math.max(0.01, r3(f.ev.dur + delta)); });
+  const evs = ids.map(id => findEv(id)).filter(f => f && f.bi === S.barIdx).map(f => f.ev);
+  evs.forEach(e => { e.dur = Math.max(0.01, r3(e.dur + delta)); });
+  packEvents(evs);
   renderAll();
 }
 /* ── edit clipboard: Cut / Copy / Paste on the current-bar selection ── */
@@ -3884,9 +3907,10 @@ function renderStaff() {
                interior can't be tapped to select, resize, adjust, or delete */
             "pointer-events": "all",
             "data-ev": ev.id, "data-basefill": "none" })
-        : svgEl("rect", { x, y: PAD_T, width: w, height: STAFF_H - PAD_T - PAD_B,
+        : svgEl("rect", { x, y: PAD_T, width: Math.max(4, w - 6), height: STAFF_H - PAD_T - PAD_B,
             fill: restFill, "data-ev": ev.id, "data-basefill": restFill });
       if (selected) { r.setAttribute("stroke", "#000"); r.setAttribute("stroke-width", 1.5); r.setAttribute("stroke-dasharray", "5 3"); }
+      r.append(svgEl("title", {}, `rest / ${fmt(ev.start)} – ${fmt(evEnd(ev))} s`));
       hook(r, null);
       svg.append(r);
       svg.append(svgEl("text", { x: x + w / 2, y: STAFF_H / 2, "text-anchor": "middle",
@@ -3934,17 +3958,21 @@ function renderStaff() {
         : (cust || (IB.color && ev.inst ? instColor(ev.inst) : (isBass ? "#666" : TH().note)));
       const mutedOp = ev.muted ? 0.28 : (isBass ? 0.9 : 1);
       const gh = uni ? NOTE_STYLES[NOTE_STYLE][1] : 8;
+      const VIS_GAP = uni ? 0 : Math.min(6, w * 0.3);    // 1/16 inch of visual air; the stored time is untouched
       const barShape = svgEl("rect", {
-        x, y: y - gh / 2, width: w, height: gh, rx: uni ? gh / 2 : 4,
+        x, y: y - gh / 2, width: Math.max(2, w - VIS_GAP), height: gh, rx: uni ? gh / 2 : 4,
         fill: toneFill,
         opacity: mutedOp,
         "data-ev": ev.id, "data-basefill": toneFill,
+        "data-spec": `${dName(m)} / ${fmt(ev.start)} – ${fmt(evEnd(ev))}`,
         "data-baseop": mutedOp, "data-idx": ti, "data-hh": gh / 2,
       });
       if (ev.muted) { barShape.setAttribute("stroke", "#555"); barShape.setAttribute("stroke-width", 1); barShape.setAttribute("stroke-dasharray", "3 2"); }
       if (cust && isLight(cust)) { barShape.setAttribute("stroke", "#999"); barShape.setAttribute("stroke-width", 1); }
       if (playingNow) { barShape.setAttribute("stroke", "#000"); barShape.setAttribute("stroke-width", 3); }
       hook(barShape, m);
+      barShape.append(svgEl("title", {},
+        `${dName(m)} / ${fmt(ev.start)} – ${fmt(evEnd(ev))} s${ev.inst ? ` · ${instShort(ev.inst)}` : ""}`));
       svg.append(barShape);
       const nameTxt = dName(m) + (isBass ? " (bass)" : "");
       if (cust) {
@@ -6360,6 +6388,19 @@ function renderToolsBar() {
   sa.textContent = "⛶ Select all";
   sa.addEventListener("click", selectAllCurrent);
   el.append(sa);
+  const sep2 = document.createElement("span");
+  sep2.style.cssText = "width:10px";
+  el.append(sep2);
+  [["⏲ Durations", () => DBAY.open, () => { DBAY.open = !DBAY.open; dbStore(); if (DBAY.open) dbSet(DBAY.val); }],
+   ["🎻 Instruments", () => IB.open, () => { IB.open = !IB.open; ibStore(); }],
+   ["🧰 Tools bay", () => QT.open, () => { QT.open = !QT.open; qtStore(); }]].forEach(([lab, isOn, tog]) => {
+    const b = document.createElement("button");
+    b.className = "btn small" + (isOn() ? " active" : "");
+    b.textContent = lab;
+    b.title = "Floating palette — draggable, stays on top";
+    b.addEventListener("click", () => { tog(); renderAll(); });
+    el.append(b);
+  });
 }
 function renderPitchGutter() {
   const g = $("pitchGutter");
@@ -8458,7 +8499,7 @@ if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   });
 }
 
-const BUILD = 60;
+const BUILD = 62;
 /* init */
 viewRangeInit();
 hzoomInit();
